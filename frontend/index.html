@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>智能旅游助手 · 飞云通</title>
+  <style>
+    /* ============ 全局变量 & 主题 ============ */
+    :root {
+      --bg: #f5f7fb;
+      --bg-grad-1: #eef2ff;
+      --bg-grad-2: #fdf2f8;
+      --card: #ffffff;
+      --border: #e8ecf4;
+      --text: #1e293b;
+      --text-sub: #64748b;
+      --primary: #4f6ef7;
+      --primary-2: #7c5cfc;
+      --accent: #12b886;
+      --user-bubble: linear-gradient(135deg, #4f6ef7, #7c5cfc);
+      --ai-bubble: #f1f4fb;
+      --danger: #ef4444;
+      --shadow: 0 8px 30px rgba(76, 90, 220, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      background-image:
+        radial-gradient(1200px 500px at 10% -10%, var(--bg-grad-1), transparent),
+        radial-gradient(1000px 500px at 100% 0%, var(--bg-grad-2), transparent);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ============ 顶栏 ============ */
+    .header {
+      height: 64px;
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 24px;
+      background: rgba(255, 255, 255, 0.75);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      z-index: 10;
+    }
+    .logo {
+      width: 40px; height: 40px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-weight: 800; font-size: 18px;
+      box-shadow: 0 4px 12px rgba(79, 110, 247, 0.35);
+    }
+    .title { font-size: 17px; font-weight: 700; }
+    .subtitle { font-size: 12px; color: var(--text-sub); margin-top: 1px; }
+    .status {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text-sub);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; }
+    .dot.on { background: #12b886; box-shadow: 0 0 0 3px rgba(18, 184, 134, 0.18); }
+    .dot.err { background: var(--danger); }
+
+    /* ============ 消息区 ============ */
+    .chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px 16px;
+      scroll-behavior: smooth;
+    }
+    .chat-inner { max-width: 820px; margin: 0 auto; }
+
+    .msg { display: flex; gap: 12px; margin-bottom: 20px; animation: rise 0.3s ease; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    .avatar {
+      width: 36px; height: 36px; flex: none;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; color: #fff;
+    }
+    .avatar.ai { background: linear-gradient(135deg, var(--primary), var(--primary-2)); }
+    .avatar.user { background: linear-gradient(135deg, #f97316, #f43f5e); }
+
+    .bubble {
+      max-width: 78%;
+      padding: 12px 16px;
+      border-radius: 16px;
+      line-height: 1.7;
+      font-size: 15px;
+      word-break: break-word;
+    }
+    .msg.user { flex-direction: row-reverse; }
+    .msg.user .bubble {
+      background: var(--user-bubble);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+      white-space: pre-wrap;
+    }
+    .msg.ai .bubble {
+      background: var(--ai-bubble);
+      border-bottom-left-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    /* Markdown 风格渲染 */
+    .bubble h1, .bubble h2, .bubble h3 { margin: 8px 0 6px; font-size: 16px; }
+    .bubble p { margin: 6px 0; }
+    .bubble ul, .bubble ol { margin: 6px 0; padding-left: 20px; }
+    .bubble code {
+      background: rgba(0,0,0,0.06); padding: 1px 6px; border-radius: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    }
+    .bubble table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
+    .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+    .bubble th { background: #eef2ff; }
+    .bubble strong { font-weight: 700; }
+    .bubble em { font-style: italic; }
+
+    /* 打字光标 */
+    .typing { display: inline-flex; gap: 4px; padding: 4px 0; }
+    .typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--text-sub); animation: blink 1.2s infinite; }
+    .typing span:nth-child(2) { animation-delay: 0.2s; }
+    .typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink { 0%,80%,100% { opacity: 0.2; } 40% { opacity: 1; } }
+
+    /* ============ 欢迎引导 & 快捷指令 ============ */
+    .welcome { text-align: center; padding: 24px 0 8px; }
+    .welcome .hero {
+      width: 72px; height: 72px; margin: 0 auto 14px;
+      border-radius: 20px;
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
+      display: flex; align-items: center; justify-content: center;
+      font-size: 34px; box-shadow: 0 10px 26px rgba(79, 110, 247, 0.35);
+    }
+    .welcome h2 { font-size: 20px; margin-bottom: 6px; }
+    .welcome p { color: var(--text-sub); font-size: 14px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 18px; }
+    .chip {
+      padding: 8px 14px; border-radius: 999px;
+      background: var(--card); border: 1px solid var(--border);
+      font-size: 13px; color: var(--text); cursor: pointer;
+      transition: all 0.15s;
+    }
+    .chip:hover { border-color: var(--primary); color: var(--primary); transform: translateY(-1px); box-shadow: var(--shadow); }
+
+    /* ============ 输入区 ============ */
+    .composer {
+      flex: none;
+      padding: 12px 20px 20px;
+    }
+    .composer-inner {
+      max-width: 820px; margin: 0 auto;
+      display: flex; align-items: flex-end; gap: 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      padding: 8px 8px 8px 16px;
+      box-shadow: var(--shadow);
+    }
+    textarea {
+      flex: 1; border: none; outline: none; resize: none;
+      font-size: 15px; line-height: 1.5; font-family: inherit;
+      max-height: 120px; background: transparent; color: var(--text);
+    }
+    .send {
+      width: 42px; height: 42px; flex: none;
+      border-radius: 14px; border: none; cursor: pointer;
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
+      color: #fff; font-size: 18px;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    .send:hover { opacity: 0.9; transform: scale(1.04); }
+    .send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ============ 滚动条 ============ */
+    .chat::-webkit-scrollbar { width: 6px; }
+    .chat::-webkit-scrollbar-thumb { background: #d3d9e6; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <!-- logo 可自行替换：把下面的 emoji / 文字换成你的 logo 图片即可 -->
+    <div class="logo">✈</div>
+    <div>
+      <div class="title">智能旅游助手</div>
+      <div class="subtitle">机票 · 酒店 · 行程规划</div>
+    </div>
+    <div class="status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">未连接</span>
+    </div>
+  </header>
+
+  <div class="chat" id="chat">
+    <div class="chat-inner" id="chatInner">
+      <div class="welcome">
+        <div class="hero">🧳</div>
+        <h2>你好，我是你的智能旅游助手</h2>
+        <p>帮你查机票、订酒店、规划行程，专业又省心</p>
+        <div class="chips">
+          <div class="chip" onclick="sendChip('帮我订一张北京到上海的机票')">✈ 查机票</div>
+          <div class="chip" onclick="sendChip('帮我推荐上海的酒店')">🏨 找酒店</div>
+          <div class="chip" onclick="sendChip('帮我规划一次上海三日游')">🗺 规划行程</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="composer">
+    <div class="composer-inner">
+      <textarea id="input" rows="1" placeholder="输入你的旅行需求，例如：帮我订北京到上海的机票…"></textarea>
+      <button class="send" id="sendBtn" onclick="send()">➤</button>
+    </div>
+  </div>
+
+  <!-- 极简 Markdown 渲染器 -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script>
+    // ================= 配置 =================
+    // 后端地址：默认连本机 FastAPI（app.py 的 /chat WebSocket）
+    const WS_URL = "ws://127.0.0.1:8000/chat";
+
+    let ws = null;                 // WebSocket 实例
+    let sessionId = genId();       // 会话 id
+    let isSending = false;         // 是否正在发送
+
+    const chat = document.getElementById("chat");
+    const chatInner = document.getElementById("chatInner");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("sendBtn");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+
+    // 生成会话 id
+    function genId() {
+      return "s_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    }
+
+    // ================= WebSocket 连接 =================
+    function connect() {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => setStatus(true, "已连接");
+      ws.onclose = () => { setStatus(false, "已断开，点击重连"); };
+      ws.onerror = () => setStatus(false, "连接错误");
+    }
+
+    function setStatus(ok, text) {
+      statusDot.className = "dot " + (ok ? "on" : "err");
+      statusText.textContent = text;
+    }
+
+    // ================= 消息渲染 =================
+    function addMsg(role, html, raw) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg " + role;
+
+      const av = document.createElement("div");
+      av.className = "avatar " + role;
+      av.textContent = role === "user" ? "我" : "✈";
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      if (role === "ai") {
+        bubble.innerHTML = renderMarkdown(html);
+      } else {
+        bubble.textContent = raw;
+      }
+
+      wrap.appendChild(av);
+      wrap.appendChild(bubble);
+      chatInner.appendChild(wrap);
+      scrollToBottom();
+      return bubble;
+    }
+
+    function renderMarkdown(text) {
+      try {
+        // 用 marked 渲染，关闭内置 HTML 以避免 XSS
+        return marked.parse(text || "", { breaks: true });
+      } catch (e) {
+        return escapeHtml(text || "");
+      }
+    }
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+      ));
+    }
+
+    function addTyping() {
+      const wrap = document.createElement("div");
+      wrap.className = "msg ai";
+      wrap.id = "typingWrap";
+      wrap.innerHTML = '<div class="avatar ai">✈</div><div class="bubble"><span class="typing"><span></span><span></span><span></span></span></div>';
+      chatInner.appendChild(wrap);
+      scrollToBottom();
+    }
+    function removeTyping() {
+      const t = document.getElementById("typingWrap");
+      if (t) t.remove();
+    }
+
+    function scrollToBottom() { chat.scrollTop = chat.scrollHeight; }
+
+    // ================= 发送逻辑 =================
+    function send() {
+      const text = input.value.trim();
+      if (!text || isSending) return;
+      sendChip(text);
+    }
+
+    function sendChip(text) {
+      if (isSending) return;
+      isSending = true;
+      sendBtn.disabled = true;
+      input.value = "";
+
+      // 确保已连接
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        connect();
+      }
+
+      // 展示用户消息
+      addMsg("user", "", text);
+
+      // 展示 AI 打字中
+      addTyping();
+
+      // 发送给后端（兼容 app.py 的格式：{query, session_id}）
+      ws.send(JSON.stringify({ query: text, session_id: sessionId }));
+
+      // 准备一个 AI 气泡用于接收流式 token
+      let aiBubble = null;
+      let acc = "";
+
+      // 监听消息：支持 [END]、[ERROR]、普通 token、以及 updates JSON
+      const onMessage = (ev) => {
+        const data = ev.data;
+        if (data === "[END]") {
+          cleanup();
+          return;
+        }
+        if (data.startsWith("[ERROR]")) {
+          removeTyping();
+          if (!aiBubble) aiBubble = addMsg("ai", "", "");
+          aiBubble.innerHTML = renderMarkdown("⚠️ " + data);
+          cleanup();
+          return;
+        }
+        // 尝试解析 updates 消息（app.py 中 dumpd 序列化的 JSON）
+        try {
+          const obj = JSON.parse(data);
+          // 若是 updates 结构，取其中 messages 里的 AI 内容
+          if (obj && typeof obj === "object") {
+            const text = extractAiText(obj);
+            if (text) {
+              removeTyping();
+              if (!aiBubble) aiBubble = addMsg("ai", "", "");
+              acc += text;
+              aiBubble.innerHTML = renderMarkdown(acc);
+              scrollToBottom();
+            }
+            return;
+          }
+        } catch (e) { /* 不是 JSON，按纯 token 处理 */ }
+
+        // 纯 token 流
+        removeTyping();
+        if (!aiBubble) aiBubble = addMsg("ai", "", "");
+        acc += data;
+        aiBubble.innerHTML = renderMarkdown(acc);
+        scrollToBottom();
+      };
+
+      const cleanup = () => {
+        ws.removeEventListener("message", onMessage);
+        isSending = false;
+        sendBtn.disabled = false;
+        input.focus();
+      };
+
+      ws.addEventListener("message", onMessage);
+    }
+
+    // 从 app.py 的 updates JSON 里尽量提取 AI 文本内容
+    function extractAiText(obj) {
+      // 结构可能是 { "messages": [ {type:"ai", content:"..."} ] } 或更深
+      const msgs = obj.messages || obj[Object.keys(obj)[0]]?.messages;
+      if (Array.isArray(msgs)) {
+        return msgs
+          .filter((m) => m && m.type === "ai" && typeof m.content === "string")
+          .map((m) => m.content)
+          .join("");
+      }
+      // 兜底：递归找 content 字符串
+      return findContent(obj);
+    }
+    function findContent(o) {
+      if (!o || typeof o !== "object") return "";
+      if (typeof o.content === "string") return o.content;
+      for (const k in o) {
+        const r = findContent(o[k]);
+        if (r) return r;
+      }
+      return "";
+    }
+
+    // ================= 键盘事件 =================
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+    input.addEventListener("input", () => {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 120) + "px";
+    });
+
+    // ================= 启动 =================
+    connect();
+  </script>
+</body>
+</html>

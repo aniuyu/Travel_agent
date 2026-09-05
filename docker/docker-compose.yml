@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: docker.1ms.run/pgvector/pgvector:pg16
+    container_name:  allagent-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allagent-network
+
+  redis:
+    image: docker.1ms.run/redis:6
+    container_name: allagent-redis
+    command: redis-server --appendonly yes --requirepass redis123
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allagent-network
+
+  minio:
+    image: docker.1ms.run/minio/minio:latest
+    container_name: allagent-minio
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_SECURE: "false"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allagent-network
+
+  ppt-mcp:
+    image: docker.1ms.run/rexrex9/allagent-ppt-mcp:v0.1
+    container_name: allagent-ppt-mcp
+    volumes:
+      - agent_files:/agent_files
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:4810/ok" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - allagent-network
+
+  all-agent:
+    image: docker.1ms.run/rexrex9/allagent-server:v0.1
+    container_name: allagent-server
+    ports:
+      - "${AGENT_SERVER_PORT:-8000}:8000"
+    command: langgraph up --port 8000
+    volumes:
+      - agent_files:/agent_files
+    env_file:
+      - .env
+    environment:
+      PPT_MCP_URL: http://ppt-mcp:4810/mcp
+      DATABASE_URI: postgres://postgres:postgres@postgres:5432/postgres
+      REDIS_URI: redis://:redis123@redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      ppt-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/ok" ]
+      interval: 10s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
+    networks:
+      - allagent-network
+
+  allagent-ui:
+      image: docker.1ms.run/rexrex9/allagent-ui:v0.1
+      container_name: allagent-ui
+      depends_on:
+        all-agent:
+          condition: service_healthy
+      ports:
+        - "${AGENT_UI_PORT:-3000}:3000"
+      environment:
+        NEXT_PUBLIC_API_URL: http://${HOST_IP:-localhost}:${AGENT_SERVER_PORT:-8000}
+      networks:
+        - allagent-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  agent_files:
+
+networks:
+  allagent-network:
+    driver: bridge
