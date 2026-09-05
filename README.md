@@ -15,208 +15,229 @@
 
 
 
-### 项目说明
+## 一、项目背景
 
-本项目基于 **Langchain 1.0** 框架开发，旨在帮助开发者快速理解和搭建通用Agent平台。项目完全开源，既可用于学习研究，也可直接拿去商用。
+### 1.1 痛点
 
-### 适用场景
+短途差旅（1~3 天的商务出行、周末游）是高频但低效的场景：
 
-- 🎓 学习AI Agent开发的最佳实践
-- 🔧 快速搭建企业级智能助手
-- 🚀 二次开发定制化AI应用
+- **信息分散**：查机票在航司官网、查酒店在 OTA、查天气还要再开一个 App；
+- **决策成本高**：面对海量航班、酒店，用户不知道"哪个最便宜、哪个最快、哪个性价比最高"；
+- **行程整合难**：查完机票查酒店，最后还得自己拼一份行程单，缺少一个"一站式"助手。
 
+### 1.2 我们的方案
 
+**飞云通旅游平台** —— 一个能"听懂需求 → 查真实数据 → 比选推荐 → 一键预订 → 生成行程单"的智能旅游助手。
 
+用户只需要用一句话（例如"我下周五去上海出差，帮我订便宜点的机票和市中心评分高的酒店，顺便看下那几天天气"），Agent 就能自动完成整个流程。
 
-## 主要功能特性
+---
 
-### 智能代理能力
+## 二、技术架构
 
-- 工具调用
-- 自主任务规划
-- 多轮对话和上下文理解
-- Agent Skill的制作与接入
+### 2.1 技术栈总览
 
-### 多模态能力
+| 层次     | 技术选型                                  | 说明                                   |
+| -------- | ----------------------------------------- | -------------------------------------- |
+| 前端     | Next.js 14 + React 18 + Tailwind          | 聊天式交互界面（`pnpm dev` 启动）      |
+| 后端     | Python + LangGraph + LangChain            | 主 Agent 编排（`langgraph dev` 启动）  |
+| 多智能体 | deepagents `create_deep_agent` + SubAgent | 主代理调度多个子代理                   |
+| 实时数据 | MCP（Model Context Protocol）             | 接入途牛（航班/酒店）、wttr.in（天气） |
+| 知识规范 | Agent Skill（SKILL.md）                   | 把"查询规范/推荐逻辑"沉淀为可复用技能  |
+| 文件存储 | MinIO                                     | 行程单等文件持久化（优雅降级）         |
 
-- 图片、文档、PDF、WORD、EXCEL、PPT等文件均可接收与生成
+### 2.2 架构分层
 
-- 暂不支持视频(因为视频模型太贵, 调试起来免费额度很快就要用完的, 不过框架在这想要扩展也不难)
-
-### 联网搜索
-
-- 集成Tavily搜索API
-- 实时信息获取和验证
-- 搜索结果智能整合
-
-### 平台能力
-
-- 支持多用户，多会话窗口
-
-### 可扩展架构
-
-- 模块化设计，易于扩展新功能
-- 插件化工具系统
-- 支持自定义子代理
-- 支持自定义中间件
-- 支持MCP接入
-- 支持Agent Skill接入
-
-
-
-## 配置要求
-
-| 配置级别 | CPU  | 内存   | 适用场景           |
-| -------- | ---- |------| ------------------ |
-| 最低配置 | 2核  | 4GB  | 个人测试（比较极限） |
-| 生产环境 | 4核+ | 8GB+ | 高并发场景         |
-
-## Quick Start
-
-1. 进入docker目录，复制.env.example文件为.env
-```shell
-cd docker
-cp .env.example.example .env.example
 ```
-2. 填写.env文件中其中这几项([.env.example(英文版)](docker/.env.example)或[.env.example.zh(中文版)](docker/.env.example.zh)文件有更详细说明)
-
-   - OPENAI_API_KEY：SiliconFlow API 密钥 (必需)，用于访问硅基流动的AI模型服务，有免费额度, 获取地址: https://cloud.siliconflow.cn/i/FVis58aF
-
-   - LANGSMITH_API_KEY ：LangSmith API 密钥 (必需),用于LangChain的追踪和监控功能, 免费注册地址: https://www.langsmith.com/
-
-   - TAVILY_SEARCH_KEY：Tavily 搜索 API 密钥 (可选), 如果设置此密钥，将启用联网搜索功能, 免费注册地址: https://tavily.com/
-
-   - HOST_IP ：服务器绑定的网络接口IP(必须), 需要外部可访问的IP地址也可是域名, 如无公网接口，则填写本地内网IP, 不可填写localhost或127.0.0.1
-
-3. 启动docker容器
-```shell
-docker compose up -d
-```
-或者 从源码构建容器启动(推荐从源码构建, 因为DockerHub的镜像经常会忘了更新)
-```shell
-docker compose -f docker-compose.build.yml up --build  -d
+┌─────────────────────────────────────────────────────────┐
+│                    前端 Next.js（飞云通旅游平台）           │
+│              聊天 UI · 快捷指令 · 流式输出                  │
+└──────────────────────┬──────────────────────────────────┘
+                       │ WebSocket / 流式
+┌──────────────────────▼──────────────────────────────────┐
+│              主 Agent（all_agent）                        │
+│   需求澄清 → 路由调度 → 结果汇总                          │
+└───────┬──────────────────────────┬──────────────────────┘
+        │                          │
+┌───────▼──────────┐     ┌─────────▼────────────┐
+│  travel-agent     │     │  itinerary-agent     │
+│  单点查询          │     │  完整行程规划          │
+│  机票/酒店/天气    │     │  交通+住宿+行程单      │
+└───────┬──────────┘     └─────────┬────────────┘
+        │                          │
+        │        工具层（MCP + Skill）              │
+        │  ┌──────────────┬──────────────┐          │
+        │  │ travel_mcp    │  weather_mcp  │          │
+        │  │ (途牛/兜底Mock)│  (wttr.in)    │          │
+        │  └──────────────┴──────────────┘          │
+        │        技能层（SKILL.md）                    │
+        │  flight/hotel/weather/travel/itinerary     │
 ```
 
-4. 访问应用
+### 2.3 核心设计：主代理 + 子代理分工
 
-   服务启动成功后，在浏览器中访问：
+| 角色                | 职责                                       | 何时调度           |
+| ------------------- | ------------------------------------------ | ------------------ |
+| **主 Agent**        | 需求澄清、意图识别、路由、结果汇总         | 始终在线           |
+| **travel-agent**    | 单点查询（只查机票 / 只查酒店 / 只查天气） | "帮我查下航班"     |
+| **itinerary-agent** | 完整行程规划（机票+酒店+天气+行程单）      | "帮我规划一次行程" |
 
-   - http://你的HOST_IP:3000   		 （前端操作界面）
-   - http://你的HOST_IP:8000/docs   （后端接口文档)
+> 主代理的提示词里固化了 6 步流程：**需求澄清 → 单点查询 → 完整规划 → 方案比选 → 预订 → 行程单**，并且强约束"不要自己查数据，必须交给子代理"。
 
-## 技术栈
+---
 
+## 三、核心机制详解
 
-- **Python 3.11+** - 主要开发语言，提供强大的异步支持和类型提示
-- **MCP (Model Context Protocol)** - 模型上下文协议，实现模型与工具的安全交互
-- **Agent Skill** - 可插拔的技能模块，支持动态加载与热更新
-- **Docker & Docker Compose** - 容器化部署和编排，确保环境一致性
-- **LangChain 生态**
-  - **LangChain v1.0** - AI应用开发框架
-  - **LangGraph** - 工作流编排
-  - **LangSmith** - AI应用可观测性平台，提供追踪、评估和监控
-  - **DeepAgent** - langchain生态下的深度Agent
-  - **Agent-Chat-UI** - 现成的前端用户界面 
-- **PostgreSQL** - 关系型数据库，存储应用数据和用户配置
-- **MinIO** - 高性能对象存储服务，用于文件管理和存储
-- **Redis** - 内存数据存储，提供缓存、会话管理和消息队列功能
-- **SiliconFlow API** - 大模型服务提供商，支持LLM、VLM、图像生成等多种AI模型
-- **Tavily Search** - 联网搜索服务，提供实时信息获取能力
+### 3.1 MCP —— 实时数据的接入标准
 
+MCP（Model Context Protocol）让 Agent 能像"插 USB 设备"一样接入外部数据源。
 
+- **途牛 MCP**：通过 `npx tuniu-cli`（stdio 模式）拉起，提供真实航班票价、酒店价格与**酒店图片**；
+- **wttr.in**：免费天气接口，返回 JSON（中文），无需 Key；
+- **兜底策略**：未配置 API Key 或连接失败时，**自动降级为内置 Mock 数据**，保证项目"到手即可跑通"。
 
-## 目录结构
+### 3.2 Agent Skill —— 把经验沉淀为规范
+
+每个技能是一份 `SKILL.md`，定义了"查什么、先确认什么、怎么推荐、哪些是红线"：
+
+| 技能                  | 作用                                                       |
+| --------------------- | ---------------------------------------------------------- |
+| `travel`              | 实时数据查询总规范（途牛工具清单、图片展示、API Key 配置） |
+| `flight_search`       | 航班查询规范（必填字段、直飞/中转、比价）                  |
+| `hotel_search`        | 酒店推荐规范（偏好收集、评分×价格×位置排序）               |
+| `weather_search`      | 天气查询规范（穿衣/带伞建议）                              |
+| `itinerary_generator` | 行程单生成规范（Markdown 模板 + 规则）                     |
+
+> 技能被 `LazyFilesystemBackend` 复制到每个会话的工作目录，子代理运行时动态加载，实现"规范与代码解耦"。
+
+### 3.3 双通道数据策略（真实优先 + Mock 兜底）
 
 ```python
-├── base/              # 基础配置
-├── conn/              # 连接层（LLM、存储等）
-├── content/           # 核心功能实现
-│   ├── mcps/          # MCP连接
-│   ├── middles/       # 中间件
-│   ├── mytools/       # 自定义工具
-│   ├── others/        # 其他功能
-│   ├── skills/        # 初始的技能目录
-│   ├── sub_agents/    # 子代理
-│   └── utils/         # 工具函数
-├── sub_projects/      # 子项目
-│   ├── agent-chat-ui/ # 前端用户界面
-│   └── ppt-mcp/       # PPT 内容处理服务
-├── docker/            # Docker 配置
-├── assits/            # 一些附件(与项目工程无关)
-├── study/             # 学习相关内容(与项目工程无关)
-└── utils/             # 通用工具
+# content/mcps/travel_mcp.py 核心逻辑
+def get_tools():
+    if os.getenv("TUNIU_API_KEY"):          # 有 Key → 连真实途牛 MCP
+        try:
+            return _real_tools()             # 实时报价 + 酒店图片
+        except Exception:
+            print("连接失败，降级 Mock")
+    return _mock_tools()                     # 无 Key → Mock 演示数据
 ```
 
+**好处**：开发/演示阶段零成本跑通全流程；接入真实 Key 后无缝切换到实时数据。
 
+---
 
-## FQA
+## 四、项目流程（用户视角）
 
-**Q: 为什么必须填写HOST_IP，不能用localhost？**
-A: 因为前后端在不同的Docker容器中运行，使用localhost会导致前端无法正确访问后端API。
+### 4.1 完整交互流程
 
-**Q: 如何查看日志排查问题？**
-A: 使用 `docker compose logs -f` 查看实时日志。
+```
+用户输入："下周五去上海出差，订便宜机票 + 市中心高评分酒店，看天气"
+        │
+        ▼
+① 需求澄清（主 Agent）
+   识别：目的地上海、出差（商务）、需机票+酒店+天气
+   补问：日期、人数、预算
+        │
+        ▼
+② 路由调度（主 Agent）
+   完整行程 → 交给 itinerary-agent
+        │
+        ▼
+③ 数据查询（子代理调用工具）
+   search_flights  → 航班列表（直飞/中转，价格）
+   search_hotels   → 酒店列表（评分、价格、图片 URL）
+   search_weather  → 目的地天气（温度、穿衣建议）
+        │
+        ▼
+④ 方案比选（子代理）
+   机票：标出「最便宜 / 最快 / 性价比」
+   酒店：按「评分 × 价格 × 位置」给首选 + 备选
+   （酒店图片直接以 Markdown 图片展示）
+        │
+        ▼
+⑤ 预订（用户确认后）
+   book_flight / book_hotel → 生成订单号（演示）
+        │
+        ▼
+⑥ 行程单生成（itinerary-agent）
+   输出结构化 Markdown：概览 / 交通 / 住宿 / 每日安排 / 预算 / 出行提示
+```
 
-**Q: 如何停止和重启服务？**
-A: 停止：`docker compose down`，重启：`docker compose restart`
+### 4.2 关键能力对照
 
+| 需求              | 实现方式                                                    |
+| ----------------- | ----------------------------------------------------------- |
+| 实时航班/票价     | 途牛 `flight_search`（兜底 Mock）                           |
+| 实时酒店列表/价格 | 途牛 `hotel_search`（兜底 Mock）                            |
+| **酒店图片**      | 途牛 `hotel_search` 返回图片 URL，`hotel_detail` 返回房型图 |
+| 天气查询          | `weather_mcp` 调 wttr.in（中文 JSON）                       |
+| 行程单生成        | `itinerary-agent` + `itinerary_generator` 技能              |
+| 预订              | `book_flight` / `book_hotel`（演示用 Mock）                 |
 
+---
 
+## 五、接入真实数据的配置
 
+### 5.1 获取途牛 API Key
 
-## 贡献指南
+1. 打开途牛开放平台：**https://open.tuniu.com/mcp**
+2. 注册登录 → 控制台 → 申请 API Key
+3. 在项目 `.env` 中填写：
 
-欢迎贡献代码！请遵循以下步骤：
+```bash
+TUNIU_API_KEY=你的APIKey
+TUNIU_AUTH_TYPE=apiKey
+```
 
-1. Fork 本仓库
-2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+### 5.2 酒店图片返回机制
 
+- `hotel_search` 返回酒店列表时，**直接包含酒店图片 URL**；
+- `hotel_detail` 返回某家酒店的**房型报价 + 房型图片**；
+- Agent 拿到 URL 后，用 Markdown 图片语法 `![](url)` 直接渲染给用户。
 
+> 全程无需额外图片接口，图片随酒店数据一起返回。
 
-## 未来计划
+---
 
-- 增加音视频能力
+## 六、项目启动（演示）
 
-- 支持更灵活的配置模型
+> 环境要求：Podman（Hyper-V 环境），**不使用** Docker/WSL。
 
-- 优化用户界面体验
+```bash
+# 1. 启动后端 Agent
+langgraph dev
 
-- 增加用户可自行接入MCP的功能
+# 2. 启动前端（另开终端）
+cd sub_projects/agent-chat-ui
+pnpm install
+pnpm dev
+```
 
-- 增加用户可自行接入Agent Skills的功能
+访问前端地址，即可与"飞云通旅游平台"对话。
 
+### 演示话术建议
 
-## 联系我们
+| 场景             | 演示输入                                       |
+| ---------------- | ---------------------------------------------- |
+| 查机票           | "帮我查 9 月 10 号北京飞上海的机票"            |
+| 查酒店（带图片） | "上海 9 月 10 号住一晚，市中心 400-600 的酒店" |
+| 查天气           | "上海下周天气怎么样"                           |
+| 完整行程         | "我下周五去上海出差 3 天，帮我规划行程"        |
+| 预订             | "就订 MU5102 这张，姓名张三"                   |
 
-- 💬 问题反馈：[提交Issue](https://github.com/rexrex9/all_agent/issues)
+---
 
+## 七、项目亮点总结
 
+1. **多智能体协同**：主代理 + 双子代理（travel / itinerary），职责清晰、按需调度。
+2. **MCP 标准化接入**：途牛（航班/酒店/图片）+ wttr.in（天气），统一走 MCP 协议。
+3. **Agent Skill 知识沉淀**：查询规范、推荐逻辑、红线约束全部写成可复用 `SKILL.md`。
+4. **真实优先 + Mock 兜底**：有 Key 用实时数据，无 Key 也能完整演示全流程。
+5. **图片能力**：酒店图片随数据返回，无需额外图片接口。
+6. **端到端可运行**：前后端、技能、子代理、工具均已打通并验证。
 
-## 致谢与引用
-
-本项目在开发过程中参考和集成了以下优秀开源项目，特此致谢：
-
-- **Agent Chat UI** - [langchain-ai/agent-chat-ui: 🦜💬 Web app for interacting with any LangGraph agent (PY & TS) via a chat interface.](https://github.com/langchain-ai/agent-chat-ui)
-- **pptx-mcp** - [samos123/pptx-mcp: Create Slides with a simple MCP server using Python PPTX library](https://github.com/samos123/pptx-mcp)
-- **excel-mcp-server** - [haris-musa/excel-mcp-server: A Model Context Protocol server for Excel file manipulation](https://github.com/haris-musa/excel-mcp-server)
-- **martitdown** - [microsoft/markitdown: Python tool for converting files and office documents to Markdown.](https://github.com/microsoft/markitdown)
-
-感谢以上项目作者的开源贡献，为社区提供了优质的技术方案。
-
-------
-
-**如果本项目对您有帮助，欢迎 Star ⭐ 支持我们！**
-
-
-
-## 开源协议
-
-本项目采用 **Apache License 2.0** 开源协议
-
-[查看完整协议](LICENSE)
+---
 
 
 
