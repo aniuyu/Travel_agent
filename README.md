@@ -1,4 +1,4 @@
-# 飞云通智能体-
+# 飞云通旅游平台-
 
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
@@ -11,7 +11,9 @@
 
 
 
-飞云通智能体是一个功能强大、开箱即用的通用智能代理系统，基于最新的AI技术栈构建。
+飞云通旅游平台
+一个基于 LangGraph + MCP + Agent Skill 的「智能旅游助手」
+面向短途差旅场景，覆盖 **机票查询 / 酒店推荐 / 天气查询 / 行程规划 / 预订** 全流程
 
 
 
