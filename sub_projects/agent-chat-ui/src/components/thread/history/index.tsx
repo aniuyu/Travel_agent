@@ -12,8 +12,10 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { PanelRightOpen, PanelRightClose } from "lucide-react";
+import { PanelRightOpen, PanelRightClose, Trash2 } from "lucide-react";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { TooltipIconButton } from "@/components/thread/tooltip-icon-button";
+import { toast } from "sonner";
 
 function ThreadList({
   threads,
@@ -23,6 +25,34 @@ function ThreadList({
   onThreadClick?: (threadId: string) => void;
 }) {
   const [threadId, setThreadId] = useQueryState("threadId");
+  const { deleteThread } = useThreads();
+
+  const handleDelete = async (
+    e: React.MouseEvent,
+    t: Thread,
+    itemText: string,
+  ) => {
+    // 阻止冒泡到父 Button 的 onClick，避免同时触发"进入会话"
+    e.stopPropagation();
+    e.preventDefault();
+
+    // 二次确认（用浏览器原生 confirm，简洁可靠；如果要更美观的对话框可以
+    // 后续替换为 AlertDialog，但当前 UI 库没自带 Dialog 组件）
+    const display = itemText.length > 24 ? itemText.slice(0, 24) + "…" : itemText;
+    const ok = window.confirm(`确定删除会话「${display}」吗？删除后无法恢复。`);
+    if (!ok) return;
+
+    const success = await deleteThread(t.thread_id);
+    if (success) {
+      toast.success("会话已删除");
+      // 如果删的是当前正在浏览的会话，清空 URL 上的 threadId 跳回首页
+      if (t.thread_id === threadId) {
+        setThreadId(null);
+      }
+    } else {
+      toast.error("删除失败，请检查后端连接");
+    }
+  };
 
   return (
     <div className="flex h-full w-full flex-col items-start justify-start gap-2 overflow-y-scroll [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent">
@@ -41,11 +71,11 @@ function ThreadList({
         return (
           <div
             key={t.thread_id}
-            className="w-full px-1"
+            className="group relative w-full px-1"
           >
             <Button
               variant="ghost"
-              className="w-[280px] items-start justify-start text-left font-normal"
+              className="w-[280px] items-start justify-start text-left font-normal pr-8"
               onClick={(e) => {
                 e.preventDefault();
                 onThreadClick?.(t.thread_id);
@@ -55,6 +85,20 @@ function ThreadList({
             >
               <p className="truncate text-ellipsis">{itemText}</p>
             </Button>
+            {/* 删除按钮：默认透明，hover 整行时显示；点击不触发父 Button */}
+            <div
+              className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 transition-opacity group-hover:opacity-100"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <TooltipIconButton
+                tooltip="删除该会话"
+                side="right"
+                onClick={(e) => handleDelete(e, t, itemText)}
+                aria-label="删除会话"
+              >
+                <Trash2 className="size-3.5 text-gray-500 hover:text-red-600" />
+              </TooltipIconButton>
+            </div>
           </div>
         );
       })}

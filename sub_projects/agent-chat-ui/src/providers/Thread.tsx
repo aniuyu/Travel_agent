@@ -20,6 +20,9 @@ interface ThreadContextType {
   setThreads: Dispatch<SetStateAction<Thread[]>>;
   threadsLoading: boolean;
   setThreadsLoading: Dispatch<SetStateAction<boolean>>;
+  // 单条删除：调用 LangGraph SDK 删除 + 本地 state 移除。
+  // 返回 true 表示删除成功，false 表示失败（调用方决定是否 toast 报错）。
+  deleteThread: (threadId: string) => Promise<boolean>;
 }
 
 const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
@@ -111,12 +114,32 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [finalApiUrl, finalAssistantId]);
 
+  // 删除单条会话：先调 LangGraph SDK 真实删除，成功后再从本地 state 移除，
+  // 这样如果服务端删除失败，本地列表也不会不一致。
+  const deleteThread = useCallback(async (threadId: string): Promise<boolean> => {
+    if (!finalApiUrl) {
+      console.warn('Missing API URL for thread deletion');
+      return false;
+    }
+    try {
+      const client = createClient(finalApiUrl, getApiKey() ?? undefined);
+      await client.threads.delete(threadId);
+      // 服务端删除成功 → 本地 state 同步移除
+      setThreads((prev) => prev.filter((t) => t.thread_id !== threadId));
+      return true;
+    } catch (error) {
+      console.error('Failed to delete thread', threadId, error);
+      return false;
+    }
+  }, [finalApiUrl]);
+
   const value = {
     getThreads,
     threads,
     setThreads,
     threadsLoading,
     setThreadsLoading,
+    deleteThread,
   };
 
   return (

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>南京到上海驾车路线测试</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, sans-serif; }
+        .wrap { display: flex; flex-direction: column; height: 100%; }
+        .header { padding: 12px 16px; background: #f5f5f5; font-size: 14px; color: #333; border-bottom: 1px solid #e0e0e0; }
+        .header b { color: #2563eb; }
+        #map { flex: 1; width: 100%; }
+    </style>
+    <script type="text/javascript">
+        window._AMapSecurityConfig = {};
+    </script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=f007c61a257a7931656cb6aa782002a1"></script>
+</head>
+<body>
+    <div class="wrap">
+        <div class="header">
+            🚗 南京到上海真实驾车路线（高德 Driving 路线规划，非直线）
+        </div>
+        <div id="map"></div>
+    </div>
+    <script>
+        var map = new AMap.Map('map', {
+            zoom: 8,
+            center: [119.6, 31.6],
+            viewMode: '2D'
+        });
+
+        var from = new AMap.LngLat(118.796624, 32.059344);  // 南京
+        var to = new AMap.LngLat(121.473667, 31.230525);    // 上海
+
+        // 起点、终点标记
+        var fromMarker = new AMap.Marker({
+            position: from,
+            title: '南京',
+            content: '<div style="background:#2563eb;color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.3);">南</div>',
+            offset: new AMap.Pixel(-13, -13)
+        });
+        fromMarker.setMap(map);
+
+        var toMarker = new AMap.Marker({
+            position: to,
+            title: '上海',
+            content: '<div style="background:#2563eb;color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.3);">沪</div>',
+            offset: new AMap.Pixel(-13, -13)
+        });
+        toMarker.setMap(map);
+
+        // 驾车路线规划
+        var driving = new AMap.Driving({
+            map: map,
+            panel: null,
+            hideMarkers: false
+        });
+
+        driving.search(from, to, function (status, result) {
+            if (status === 'complete') {
+                console.log('路线规划成功，距离：' + result.routes[0].distance + '米，时长：' + result.routes[0].time + '秒');
+                map.setFitView();
+            } else {
+                console.warn('路线规划失败', result);
+                document.querySelector('.header').innerHTML += ' <b style="color:red">（路线规划失败，请检查 Key 的 Web服务权限）</b>';
+            }
+        });
+    </script>
+</body>
+</html>

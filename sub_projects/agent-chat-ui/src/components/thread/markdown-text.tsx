@@ -11,6 +11,8 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { SyntaxHighlighter } from "@/components/thread/syntax-highlighter";
 
 import { TooltipIconButton } from "@/components/thread/tooltip-icon-button";
+import { TravelMap, type TravelMapData } from "@/components/thread/TravelMap";
+import { ErrorBoundary } from "@/components/thread/ErrorBoundary";
 import { cn } from "@/lib/utils";
 
 import "katex/dist/katex.min.css";
@@ -234,6 +236,18 @@ const defaultComponents: any = {
       const language = match[1];
       const code = String(children).replace(/\n$/, "");
 
+      // 地图数据：识别 ```map-json 代码块，渲染成高德地图组件
+      if (language === "map-json") {
+        try {
+          const mapData = JSON.parse(code) as TravelMapData;
+          if (mapData && mapData.type === "map") {
+            return <TravelMap data={mapData} />;
+          }
+        } catch {
+          // 解析失败则回退到普通代码块展示
+        }
+      }
+
       return (
         <>
           <CodeHeader
@@ -262,17 +276,80 @@ const defaultComponents: any = {
 };
 
 const MarkdownTextImpl: FC<{ children: string }> = ({ children }) => {
+  // 提取 AI 输出中的地图数据（兼容两种格式）：
+  // 1. ```map-json ... ``` 代码块
+  // 2. 裸 JSON {"type":"map",...}（AI 有时会改写工具返回，把代码块拆成裸 JSON）
+  const mapBlocks = extractMapData(children);
+
+  // 把地图数据（JSON / 代码块）从文本中剔除，剩下的文字正常渲染
+  let text = children;
+  if (mapBlocks.length > 0) {
+    // 剔除 ```map-json 代码块
+    text = text.replace(/```map-json\s*\{[\s\S]*?\}\s*```/g, "");
+    // 剔除裸 JSON（{"type":"map", ...}）
+    text = text.replace(/\{\s*"type"\s*:\s*"map"[\s\S]*?\}/g, "");
+  }
+
   return (
     <div className="markdown-content">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={defaultComponents}
-      >
-        {children}
-      </ReactMarkdown>
+      {/* 先渲染地图（在文字上方），用 ErrorBoundary 隔离，避免地图异常拖垮整个消息 */}
+      {mapBlocks.map((mapData, i) => (
+        <ErrorBoundary key={`map-${i}`}>
+          <TravelMap data={mapData} />
+        </ErrorBoundary>
+      ))}
+
+      {/* 剩余文字正常走 Markdown 渲染 */}
+      {text.trim().length > 0 && (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+          components={defaultComponents}
+        >
+          {text}
+        </ReactMarkdown>
+      )}
     </div>
   );
 };
+
+/**
+ * 从文本中提取所有地图数据块（TravelMapData）。
+ * 兼容：```map-json 代码块、裸 JSON {"type":"map",...}。
+ */
+function extractMapData(text: string): TravelMapData[] {
+  const results: TravelMapData[] = [];
+
+  // 1) 匹配 ```map-json 代码块
+  const codeBlockRe = /```map-json\s*(\{[\s\S]*?\})\s*```/g;
+  let m: RegExpExecArray | null;
+  while ((m = codeBlockRe.exec(text)) !== null) {
+    try {
+      const parsed = JSON.parse(m[1]) as TravelMapData;
+      if (parsed?.type === "map") results.push(parsed);
+    } catch {
+      // 忽略解析失败
+    }
+  }
+
+  // 2) 匹配裸 JSON {"type":"map", ...}（AI 改写后的情况）
+  const bareRe = /\{\s*"type"\s*:\s*"map"[\s\S]*?\}/g;
+  while ((m = bareRe.exec(text)) !== null) {
+    try {
+      const parsed = JSON.parse(m[0]) as TravelMapData;
+      if (parsed?.type === "map") {
+        // 去重（避免同一个 JSON 被 codeBlock 和 bare 各匹配一次）
+        const dup = results.some(
+          (r) => JSON.stringify(r) === JSON.stringify(parsed),
+        );
+        if (!dup) results.push(parsed);
+      }
+    } catch {
+      // 忽略解析失败
+    }
+  }
+
+  return results;
+}
 
 export const MarkdownText = memo(MarkdownTextImpl);

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>南京到上海 实时路况 + 导航跳转</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, sans-serif; }
+        .wrap { display: flex; flex-direction: column; height: 100%; }
+        .header { padding: 12px 16px; background: #f5f5f5; font-size: 14px; color: #333; border-bottom: 1px solid #e0e0e0; }
+        .header b { color: #2563eb; }
+        #map { flex: 1; width: 100%; }
+        .footer { padding: 12px 16px; background: #fff; border-top: 1px solid #e0e0e0; }
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: #2563eb; color: #fff; text-decoration: none;
+            padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: 500;
+        }
+        .btn:hover { opacity: 0.9; }
+        .tip { margin-top: 8px; font-size: 12px; color: #888; }
+    </style>
+    <script type="text/javascript">
+        window._AMapSecurityConfig = {};
+    </script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=f007c61a257a7931656cb6aa782002a1"></script>
+</head>
+<body>
+    <div class="wrap">
+        <div class="header">
+            🚗 <b>南京 → 上海</b> 驾车路线（已叠加实时路况：红=拥堵 黄=缓行 绿=畅通）
+        </div>
+        <div id="map"></div>
+        <div class="footer">
+            <a class="btn" id="navBtn" href="#" target="_blank">🚗 在高德地图中导航（实时导航）</a>
+            <div class="tip">点击按钮将跳转到高德地图 App，开始真正的实时导航（语音播报 + 逐向转向）</div>
+        </div>
+    </div>
+    <script>
+        var map = new AMap.Map('map', {
+            zoom: 8,
+            center: [119.6, 31.6],
+            viewMode: '2D',
+            // 叠加实时路况图层
+            layers: [new AMap.TileLayer.Traffic({ autoRefresh: true, interval: 180 })]
+        });
+
+        var from = new AMap.LngLat(118.796624, 32.059344);  // 南京
+        var to = new AMap.LngLat(121.473667, 31.230525);    // 上海
+
+        // 起点终点标记
+        [['南京', from, '南'], ['上海', to, '沪']].forEach(function (item) {
+            new AMap.Marker({
+                position: item[1],
+                title: item[0],
+                content: '<div style="background:#2563eb;color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.3);">' + item[2] + '</div>',
+                offset: new AMap.Pixel(-13, -13)
+            }).setMap(map);
+        });
+
+        // 驾车路线规划
+        var driving = new AMap.Driving({ map: map, panel: null, hideMarkers: false });
+        driving.search(from, to, function (status, result) {
+            if (status === 'complete') {
+                var d = (result.routes[0].distance / 1000).toFixed(1);
+                var t = Math.round(result.routes[0].time / 60);
+                document.querySelector('.header').innerHTML += ' <span style="color:#555">约 ' + d + ' 公里 · ' + t + ' 分钟</span>';
+                map.setFitView();
+            } else {
+                console.warn('路线规划失败', result);
+            }
+        });
+
+        // 导航跳转链接（高德 URI API）
+        document.getElementById('navBtn').href =
+            'https://uri.amap.com/navigation?to=' + to.lng + ',' + to.lat + ',上海&mode=0&coordinate=gaode';
+    </script>
+</body>
+</html>

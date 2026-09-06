@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>地图功能测试</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, sans-serif; }
+        .wrap { display: flex; flex-direction: column; height: 100%; }
+        .header { padding: 12px 16px; background: #f5f5f5; font-size: 14px; color: #333; border-bottom: 1px solid #e0e0e0; }
+        .header b { color: #7c3aed; }
+        #map { flex: 1; width: 100%; }
+    </style>
+    <script type="text/javascript">
+        window._AMapSecurityConfig = {};
+    </script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=f007c61a257a7931656cb6aa782002a1"></script>
+</head>
+<body>
+    <div class="wrap">
+        <div class="header">
+            🗺️ 地图功能测试 —— 三个打点（外滩·景点 / 全季酒店·酒店 / 上海虹桥·车站）+ 一条串联路线
+        </div>
+        <div id="map"></div>
+    </div>
+    <script>
+        var map = new AMap.Map('map', {
+            zoom: 11,
+            center: [121.47, 31.22],
+            viewMode: '2D'
+        });
+
+        var colors = { scenic: '#059669', hotel: '#7c3aed', station: '#2563eb' };
+        var points = [
+            { name: '外滩', lng: 121.493, lat: 31.245, icon: 'scenic' },
+            { name: '全季酒店', lng: 121.48, lat: 31.23, icon: 'hotel' },
+            { name: '上海虹桥', lng: 121.32, lat: 31.197, icon: 'station' }
+        ];
+
+        // 打点
+        points.forEach(function (p) {
+            var c = colors[p.icon] || '#ef4444';
+            var marker = new AMap.Marker({
+                position: [p.lng, p.lat],
+                title: p.name,
+                content: '<div style="background:' + c + ';color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.3);">' + p.name.slice(0, 1) + '</div>',
+                offset: new AMap.Pixel(-13, -13)
+            });
+            marker.setMap(map);
+        });
+
+        // 串联路线
+        var line = new AMap.Polyline({
+            path: points.map(function (p) { return [p.lng, p.lat]; }),
+            strokeColor: '#7c3aed',
+            strokeWeight: 4,
+            strokeStyle: 'dashed',
+            strokeOpacity: 0.8
+        });
+        line.setMap(map);
+
+        // 自适应视野
+        map.setFitView(points.map(function (p) { return new AMap.LngLat(p.lng, p.lat); }), false, [60, 60, 60, 60]);
+
+        // 输出状态
+        console.log('地图加载成功，打点 ' + points.length + ' 个');
+    </script>
+</body>
+</html>

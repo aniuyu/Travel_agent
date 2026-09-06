@@ -45,6 +45,7 @@ class AllAgent():
             prompt+='\n  1) 需求澄清：先确认目的地、日期、人数、预算、主题等关键信息，缺什么问什么。'
             prompt+='\n  2) 单点查询（只查机票 / 只查火车票/高铁票 / 只查酒店 / 只查天气）：交给子代理 travel-agent。'
             prompt+='\n  3) 查看某个具体酒店/航班/车次的图片或详情（含"看 X 酒店的图片"）：交给子代理 travel-agent，由它调用真实数据工具拿带图片 URL 的结果，绝不要用 tavily_search 去搜网络图片。'
+            prompt+='\n  3.5) 地图/路线/导航需求（如"从南京到上海怎么走""自驾路线""XX 在地图上标出来"）：交给子代理 travel-agent，由它调 geocode + build_map 生成高德地图。绝不要自己用文字描述路线。'
             prompt+='\n  4) 完整行程规划（机票/火车票+酒店+天气+行程单）：交给子代理 itinerary-agent。'
             prompt+='\n  5) 方案比选：由子代理给出「最便宜/最快/性价比」推荐。'
             prompt+='\n  6) 预订：用户确认后，用 book_flight / book_train / book_hotel 完成预订（演示）。'
@@ -52,6 +53,7 @@ class AllAgent():
             prompt+='\n注意：'
             prompt+='\n  - 不要自己用搜索工具（tavily）去查航班/火车票/酒店/天气/酒店图片，必须交给上述子代理。'
             prompt+='\n  - tavily_search 仅用于：通用新闻/资讯查询、查不熟悉的主题知识这类非旅游场景。'
+            prompt+='\n  - 子代理返回的 ```map-json 代码块（高德地图数据）必须【原样、完整】转发给用户，不要改写、不要省略、不要用文字描述路线去替代它；地图代码块必须出现在最终回复里。'
 
         self.agent = create_deep_agent(
             model=get_llm(), # 模型, 传一个llm实例
