@@ -10,3 +10,4 @@ pypandoc
 mcp
 langchain-mcp-adapters
 fastapi
+pymysql

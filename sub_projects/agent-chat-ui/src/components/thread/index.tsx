@@ -23,6 +23,9 @@ import {
   SquarePen,
   XIcon,
   Plus,
+  LogOut,
+  UserRoundCog,
+  Map,
 } from "lucide-react";
 import { useQueryState, parseAsBoolean } from "nuqs";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
@@ -393,6 +396,16 @@ export function Thread() {
                   <TooltipIconButton
                     size="lg"
                     className="p-4"
+                    tooltip="行程规划"
+                    variant="ghost"
+                  >
+                    <Link href="/itinerary">
+                      <Map className="size-5" />
+                    </Link>
+                  </TooltipIconButton>
+                  <TooltipIconButton
+                    size="lg"
+                    className="p-4"
                     tooltip="New thread"
                     variant="ghost"
                     onClick={() => setThreadId(null)}
@@ -402,6 +415,32 @@ export function Thread() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                <TooltipIconButton
+                  size="lg"
+                  className="p-4"
+                  tooltip="切换账户"
+                  variant="ghost"
+                  onClick={() => {
+                    localStorage.removeItem("fy_login");
+                    localStorage.removeItem("fy_user");
+                    window.location.href = "/login";
+                  }}
+                >
+                  <UserRoundCog className="size-5" />
+                </TooltipIconButton>
+                <TooltipIconButton
+                  size="lg"
+                  className="p-4"
+                  tooltip="退出登录"
+                  variant="ghost"
+                  onClick={() => {
+                    localStorage.removeItem("fy_login");
+                    localStorage.removeItem("fy_user");
+                    window.location.href = "/login";
+                  }}
+                >
+                  <LogOut className="size-5" />
+                </TooltipIconButton>
                 <TooltipIconButton
                   size="lg"
                   className="p-4"
