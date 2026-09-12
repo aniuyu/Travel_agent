@@ -7,7 +7,8 @@ from typing import AsyncGenerator
 import fastapi
 from pydantic import BaseModel
 from fastapi import WebSocket, WebSocketDisconnect, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
@@ -20,12 +21,40 @@ from conn import user_db
 from conn import trip_planner
 # 行程分享存储（MySQL itinerary_share 表）
 from conn import share_db
+from conn import chat_db
 
 # 注意：`agent` 改为懒加载（见 websocket_chat 内部）。
 # 原因：agent 初始化会触发 travily_search.get_tools() -> asyncio.run()，
 #       而 uvicorn --reload 在 import 阶段处于事件循环上下文，直接 import 会报
 #       "asyncio.run() cannot be called from a running event loop"。
 #       注册/登录/分享接口不需要 agent，因此只在 /chat 真正连接时才加载。
+#
+# 【重要】懒加载必须在「子线程」里做：
+#   /chat 是 async 处理器，本身运行在 FastAPI 的事件循环里，直接 await 里 import
+#   依然会触发 asyncio.run() 在运行中循环里报错。子线程没有运行中的事件循环，
+#   因此用 asyncio.to_thread 包装导入即可；同时保留「启动快、首条消息才加载」的特性。
+_agent = None
+_agent_lock = asyncio.Lock()
+
+
+def _load_agent():
+    """在无事件循环的线程中导入 agent（模块级会调用 asyncio.run 加载 MCP 工具）。"""
+    from agent import agent  # noqa: F401
+    return agent
+
+
+async def get_agent():
+    """线程安全地懒加载并缓存 agent。"""
+    global _agent
+    if _agent is not None:
+        return _agent
+    async with _agent_lock:
+        if _agent is None:
+            print("[chat] 首次加载 agent（约 10s，加载 MCP 工具）…")
+            _agent = await asyncio.to_thread(_load_agent)
+            print("[chat] agent 加载完成")
+    return _agent
+
 
 # ===========================================================================
 # 旅游助手集成说明（无需改动 agent 本体）
@@ -63,7 +92,8 @@ async def lifespan(app: fastapi.FastAPI):
     try:
         user_db.init_db()
         share_db.ensure_table()
-        print("[启动] 数据库初始化完成（Travel 库 + user 表 + itinerary_share 表）")
+        chat_db.ensure_table()
+        print("[启动] 数据库初始化完成（Travel 库 + user 表 + itinerary_share 表 + chat_message 表）")
     except Exception as e:
         print(f"[警告] 数据库初始化失败（请确认 MySQL 已启动）：{e}")
     yield
@@ -79,6 +109,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# 静态文件：把 /agent_files 挂载为 /files，让前端能直接渲染 AI 生成的图片
+# ---------------------------------------------------------------------------
+# 真实路径：base/config.py 的 ROOT_PATH_AGENT 默认是 D:\agent_files
+# （不同机器/部署位置可能不同，下面这行做兼容：先取绝对路径，找不到再退回当前目录的 agent_files）
+import os as _os
+_AGENT_FILES_ROOT = _os.path.abspath("/agent_files")
+if not _os.path.isdir(_AGENT_FILES_ROOT):
+    _fallback = _os.path.join(_os.path.dirname(__file__), "agent_files")
+    _os.makedirs(_fallback, exist_ok=True)
+    _AGENT_FILES_ROOT = _fallback
+
+
+@app.get("/files/list")
+def list_agent_files(thread_id: str, subdir: str = ""):
+    """列出 thread_id 下某子目录的文件名（前端图片加载失败时做兜底匹配）。"""
+    if ".." in thread_id.replace("\\", "/").split("/"):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    base = _os.path.join(_AGENT_FILES_ROOT, thread_id)
+    if not _os.path.isdir(base):
+        return JSONResponse({"error": "no such thread", "files": []}, status_code=200)
+    target = _os.path.join(base, subdir) if subdir else base
+    if not _os.path.isdir(target):
+        return JSONResponse({"error": "no such subdir", "files": []}, status_code=200)
+    files = []
+    for name in _os.listdir(target):
+        full = _os.path.join(target, name)
+        if _os.path.isfile(full):
+            files.append({"name": name, "mtime": int(_os.path.getmtime(full))})
+    # 按 mtime 倒序（最新的在前）
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"thread_id": thread_id, "subdir": subdir, "files": files}
+
+
+@app.get("/files/{file_path:path}")
+def serve_agent_file(file_path: str):
+    """服务 agent_files 下的任意文件（图片、文档等）。
+    前端 ChatDock 收到 AI 文本里的相对路径（generate_images/xxx.png），
+    会自动补全成 http://localhost:8000/files/<thread_id>/<path>，从而拿到真实图片。
+    """
+    # 防穿越：禁止 ..
+    if ".." in file_path.replace("\\", "/").split("/"):
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    abs_path = _os.path.join(_AGENT_FILES_ROOT, file_path)
+    if not _os.path.isfile(abs_path):
+        return JSONResponse({"error": "not found", "path": file_path}, status_code=404)
+    return FileResponse(abs_path)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +245,29 @@ def share_get(share_id: str):
     if not row:
         return JSONResponse(status_code=404, content={"status": "error", "message": "分享不存在或已过期"})
     return {"status": "success", "data": row}
+
+
+# ---------------------------------------------------------------------------
+# 对话历史（完整落库 + 查询 / 删除）
+# ---------------------------------------------------------------------------
+@app.get('/chat/history')
+def chat_history(session_id: str, limit: int = 100):
+    """按 session_id 拉取完整对话历史（正序）。"""
+    try:
+        rows = chat_db.get_history(session_id, limit)
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"读取历史失败：{e}"})
+
+
+@app.delete('/chat/history')
+def chat_history_delete(session_id: str):
+    """删除某个会话的全部历史。"""
+    try:
+        deleted = chat_db.delete_session(session_id)
+        return {"status": "success", "data": {"deleted": deleted}}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"删除历史失败：{e}"})
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +428,12 @@ class TripPlanBody(BaseModel):
     depart_date: str = ""
     companion: str = "独旅"
     extra_notes: str = ""
+    # 用户明确选定的酒店名 / 车次号（新建行程前选定，创建后优先展示）
+    selected_hotel: str = ""
+    selected_ticket: str = ""
+    # 选定时的完整信息（站点/时间/价格/星级等），用于生成更真实的展示数据
+    selected_hotel_detail: dict | None = None
+    selected_ticket_detail: dict | None = None
 
 
 @app.post('/trip/plan')
@@ -351,6 +459,10 @@ def trip_plan(body: TripPlanBody):
             depart_date=body.depart_date,
             companion=body.companion,
             extra_notes=body.extra_notes,
+            selected_hotel=body.selected_hotel,
+            selected_ticket=body.selected_ticket,
+            selected_hotel_detail=body.selected_hotel_detail,
+            selected_ticket_detail=body.selected_ticket_detail,
         )
         # 同时存到 share_db，返回 share_id 供前端"选档"页用
         share_id = share_db.create_share(
@@ -448,44 +560,123 @@ async def read_document(file_path: str):
 
 @app.websocket('/chat')
 async def websocket_chat(websocket: WebSocket):
+    """
+    对话 WebSocket。
+
+    协议（客户端 → 服务端）：
+      · { "query": "...", "session_id": "..." }   发起一轮对话
+      · { "type": "stop" }                        终止当前正在生成的这一轮
+
+    协议（服务端 → 客户端）：
+      · 普通文本 token（流式增量）
+      · updates JSON（LangGraph 节点/中间件状态）
+      · "[END]"        正常结束
+      · "[STOPPED]"    因客户端终止而结束
+      · "[ERROR] xxx"  出错
+
+    实现要点：用一个并发的 reader 任务专门收消息，
+    这样在 `async for` 流式生成期间也能立刻收到 stop 信号并中断。
+    """
     await websocket.accept()
+
+    inbox: asyncio.Queue = asyncio.Queue()
+    stop_event = asyncio.Event()
+
+    async def reader():
+        """并发读取客户端消息：查询入队；终止信号置位 stop_event。"""
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    msg = {"query": raw}
+                if isinstance(msg, dict) and msg.get("type") == "stop":
+                    stop_event.set()  # 立即中断当前生成
+                else:
+                    await inbox.put(msg)
+        except WebSocketDisconnect:
+            await inbox.put(None)
+        except Exception as e:
+            print(f"[chat] reader 结束: {e}")
+            await inbox.put(None)
+
+    reader_task = asyncio.create_task(reader())
+
     try:
-        # 懒加载 agent：只在真正聊天时才导入，避免启动时因 asyncio 事件循环冲突崩溃
-        from agent import agent
+        # 懒加载 agent（在子线程中导入，避免 asyncio.run 在运行中的事件循环里报错）
+        # reader 已在跑，客户端可先发消息入队，不必等 agent 加载完
+        agent = await get_agent()
+
         while True:
-            # 接收前端发送的消息
-            data = await websocket.receive_text()
-            query_data = json.loads(data)
+            query_data = await inbox.get()
+            if query_data is None:
+                break
+
             query = query_data.get('query', '')
             session_id = query_data.get('session_id', str(uuid.uuid4()))
+            stop_event.clear()
+            stopped = False
+
+            # 累积这一轮 AI 的完整文本（用于落库）
+            ai_text_parts: list[str] = []
 
             # 使用真实的 agent.astream 方法
             # 通过 config 传入 thread_id（即 session_id），
             # 一方面用于多会话隔离，另一方面供中间件（如 FileManagerMiddleware）
             # 和旅游子代理获取当前会话上下文。
-            async for chunk in agent.astream(
+            stream = agent.astream(
                 {"messages": [HumanMessage(content=query)]},
                 stream_mode=["updates", "messages"],
                 config={"configurable": {"thread_id": session_id}},
-            ):
-                if chunk[0] == 'updates':
-                    # 处理更新消息
-                    await websocket.send_text(json.dumps(dumpd(chunk[1])))
-                elif chunk[0] == 'messages':
-                    # 处理消息流
-                    for message in chunk[1]:
-                        if isinstance(message, AIMessageChunk) and message.content:
-                            # 发送 token
-                            await websocket.send_text(message.content)
+            )
+            try:
+                async for chunk in stream:
+                    # 每收到一块就检查一次终止信号
+                    if stop_event.is_set():
+                        stopped = True
+                        break
+                    if chunk[0] == 'updates':
+                        # 处理更新消息
+                        await websocket.send_text(json.dumps(dumpd(chunk[1])))
+                    elif chunk[0] == 'messages':
+                        # 处理消息流
+                        for message in chunk[1]:
+                            if isinstance(message, AIMessageChunk) and message.content:
+                                # 发送 token
+                                await websocket.send_text(message.content)
+                                ai_text_parts.append(message.content)
+            finally:
+                # 被终止时主动关闭生成器，尽快释放底层任务（停止继续消耗模型算力）
+                if stopped and hasattr(stream, "aclose"):
+                    try:
+                        await stream.aclose()
+                    except Exception:
+                        pass
+
+            # ---- 落库：用户消息 + AI 完整回复（异步，失败不影响对话） ----
+            # 放在发送 [END]/[STOPPED] 之前，确保客户端收到结束标记时数据已落库。
+            try:
+                await asyncio.to_thread(chat_db.insert_message, session_id, "user", query)
+                ai_text = "".join(ai_text_parts).strip()
+                if ai_text:
+                    await asyncio.to_thread(chat_db.insert_message, session_id, "ai", ai_text)
+            except Exception as e:
+                print(f"[chat] 落库失败（忽略）：{e}")
 
             # 发送结束标记
-            await websocket.send_text("[END]")
+            await websocket.send_text("[STOPPED]" if stopped else "[END]")
 
     except WebSocketDisconnect:
         print("Client disconnected")
     except Exception as e:
         print(f"Error in websocket: {e}")
-        await websocket.send_text(f"[ERROR] {str(e)}")
+        try:
+            await websocket.send_text(f"[ERROR] {str(e)}")
+        except Exception:
+            pass
+    finally:
+        reader_task.cancel()
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@ import asyncio
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from deepagents import create_deep_agent
+from langgraph.checkpoint.memory import MemorySaver
 from conn.llm import get_llm
 from base import config as cfg
 from content.others import mybackend
@@ -55,13 +56,19 @@ class AllAgent():
             prompt+='\n  - tavily_search 仅用于：通用新闻/资讯查询、查不熟悉的主题知识这类非旅游场景。'
             prompt+='\n  - 子代理返回的 ```map-json 代码块（高德地图数据）必须【原样、完整】转发给用户，不要改写、不要省略、不要用文字描述路线去替代它；地图代码块必须出现在最终回复里。'
 
+        # checkpointer 是 LangGraph 的记忆开关：
+        #   - 配合 config={"configurable":{"thread_id": ...}} 即可在同一个 thread 内保留全轮 messages
+        #   - 用 InMemoryMemorySaver，进程重启会丢，生产可换 Postgres/Sqlite
+        self.checkpointer = MemorySaver()
+
         self.agent = create_deep_agent(
             model=get_llm(), # 模型, 传一个llm实例
             tools=self._get_tools(), # 工具集
             system_prompt=prompt, # 系统提示词
             backend=mybackend.backend_factory,
             middleware=self._get_middles(),
-            subagents = self._get_subagents()
+            subagents = self._get_subagents(),
+            checkpointer=self.checkpointer,
         )
 
     def _get_middles(self):

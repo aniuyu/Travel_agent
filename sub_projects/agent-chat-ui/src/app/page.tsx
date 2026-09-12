@@ -1,29 +1,18 @@
 "use client";
 
 /**
- * 首页 / → 重定向到登录页或工作台
- * 不再渲染聊天页（聊天依赖 langgraph，已迁移到独立工作台 /workspace）
+ * 首页 /：保留一个 loading 占位。
+ * middleware 已在请求到达时统一跳转到 /workspace 或 /login，
+ * 所以这里基本不会被实际渲染。留个 fallback 防止中间件 matcher 失效时一片白屏。
  */
 
-import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 export default function HomePage(): React.ReactNode {
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    const loggedIn = localStorage.getItem("fy_login") === "1";
-    window.location.replace(loggedIn ? "/workspace" : "/login");
-  }, []);
-
-  if (!ready) {
-    setReady(true);
-  }
-
   return (
-    <div className="flex h-screen items-center justify-center bg-gray-50 text-gray-400">
+    <div className="flex h-screen items-center justify-center bg-[#0a0a1a] text-indigo-100/40">
       <Sparkles className="mr-2 size-5 animate-pulse text-indigo-400" />
-      加载中…
+      正在跳转工作台…
     </div>
   );
 }

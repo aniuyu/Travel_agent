@@ -3,6 +3,7 @@ import { ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
+import { clearAuth } from "@/lib/auth";
 import { useStreamContext } from "@/providers/Stream";
 import { useState, FormEvent } from "react";
 import { Button } from "../ui/button";
@@ -421,8 +422,7 @@ export function Thread() {
                   tooltip="切换账户"
                   variant="ghost"
                   onClick={() => {
-                    localStorage.removeItem("fy_login");
-                    localStorage.removeItem("fy_user");
+                    clearAuth();
                     window.location.href = "/login";
                   }}
                 >
@@ -434,8 +434,7 @@ export function Thread() {
                   tooltip="退出登录"
                   variant="ghost"
                   onClick={() => {
-                    localStorage.removeItem("fy_login");
-                    localStorage.removeItem("fy_user");
+                    clearAuth();
                     window.location.href = "/login";
                   }}
                 >
