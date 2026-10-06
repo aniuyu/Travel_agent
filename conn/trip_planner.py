@@ -27,12 +27,35 @@ from content.mcps.geo_mcp import _geocode_amap, _mock_geocode  # noqa
 # ---------------------------------------------------------------------------
 # 大模型总结（调用 conn.llm.get_llm，失败时降级为 None，绝不阻塞生成）
 # ---------------------------------------------------------------------------
-def _ai_summarize(prompt: str, timeout: int = 20) -> Optional[str]:
-    """调用大模型生成文案。失败/超时返回 None，调用方降级用模板。"""
+def _ai_summarize(prompt: str, timeout: int = 90, max_tokens: int = 600) -> Optional[str]:
+    """
+    调用大模型生成文案。失败/超时返回 None，调用方降级用模板。
+
+    注意：
+      - timeout 默认 90s。本项目使用的模型服务较慢（实测基础延迟 ~11s，
+        完整行程 JSON 输出 30~45s），设太小会导致 AI 文案全部降级为模板。
+      - max_tokens 限制输出长度，避免模型啰嗦导致生成时间失控。
+      - 超时用线程池实现（llm.invoke 本身不支持 timeout 参数）。
+        超时后 shutdown(wait=False)，不阻塞主流程。
+    """
     try:
+        import concurrent.futures as _cf
         from conn.llm import get_llm
+
         llm = get_llm()
-        res = llm.invoke(prompt)
+        # 限制输出长度（不支持时静默忽略）
+        try:
+            llm = llm.bind(max_tokens=max_tokens)
+        except Exception:
+            pass
+
+        ex = _cf.ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = ex.submit(llm.invoke, prompt)
+            res = fut.result(timeout=timeout)
+        finally:
+            ex.shutdown(wait=False)
+
         # content 可能是 str，也可能是 list[dict]（新版 LangChain）
         content = getattr(res, "content", None)
         if content is None:
@@ -576,52 +599,166 @@ def plan_trip(
         else None
     )
 
-    # ---------- 2) 真实天气（wttr.in）----------
-    weather = _fetch_weather(destination)
+    # ---------- 2~5) 天气 / 酒店 / 车票 / 机票 / 景点：并发拉取 ----------
+    # 这 5 路请求互不依赖，串行要十几二十秒，并发后只需最慢那一路的时间。
+    # （LLM 文案生成依赖这些结果，无法与之并发，所以这里省的是网络等待）
+    import concurrent.futures as _cf
 
-    # ---------- 3) 真实酒店（途牛）→ Mock 降级 ----------
-    hotels = []
-    try:
-        if _find_tuniu():
-            tuniu_args = {
-                "cityName": destination,
-                "checkInDate": depart_date or datetime.now().strftime("%Y-%m-%d"),
-                "checkOutDate": (
-                    datetime.strptime(depart_date, "%Y-%m-%d") + timedelta(days=n_days)
-                ).strftime("%Y-%m-%d") if depart_date else (datetime.now() + timedelta(days=n_days)).strftime("%Y-%m-%d"),
-            }
-            data = _tuniu_call("hotel", "tuniuHotelSearch", tuniu_args)
-            if data and isinstance(data, dict):
-                # 途牛返回结构通常含 hotelList / data 列表；按常见路径拿前 3 家
-                raw_list = (
-                    data.get("data", {}).get("hotelList", [])
-                    if isinstance(data.get("data"), dict)
-                    else data.get("hotelList", []) or data.get("hotels", [])
-                )
-                for h in raw_list[:3]:
-                    hotels.append({
-                        "name": h.get("hotelName") or h.get("name") or f"{destination}酒店",
-                        "stars": int(h.get("star") or h.get("starLevel") or hotel_stars),
-                        "score": float(h.get("commentScore") or h.get("score") or 4.5),
-                        "price": int(h.get("lowestPrice") or h.get("price") or 400),
-                        "image": h.get("firstPic") or "🏨",
-                        "tag": h.get("business") or h.get("tag") or "近景点",
-                    })
-    except Exception:
-        pass
-    if not hotels:
-        hotels = _mock_hotels(destination, n_days, hotel_stars)
+    def _task_weather():
+        try:
+            return _fetch_weather(destination)
+        except Exception:
+            return None
+
+    def _task_hotels():
+        out = []
+        try:
+            if _find_tuniu():
+                tuniu_args = {
+                    "cityName": destination,
+                    "checkInDate": depart_date or datetime.now().strftime("%Y-%m-%d"),
+                    "checkOutDate": (
+                        datetime.strptime(depart_date, "%Y-%m-%d") + timedelta(days=n_days)
+                    ).strftime("%Y-%m-%d") if depart_date else (datetime.now() + timedelta(days=n_days)).strftime("%Y-%m-%d"),
+                }
+                data = _tuniu_call("hotel", "tuniuHotelSearch", tuniu_args)
+                if data and isinstance(data, dict):
+                    # 途牛返回结构通常含 hotelList / data 列表；按常见路径拿前 3 家
+                    raw_list = (
+                        data.get("data", {}).get("hotelList", [])
+                        if isinstance(data.get("data"), dict)
+                        else data.get("hotelList", []) or data.get("hotels", [])
+                    )
+                    for h in raw_list[:3]:
+                        out.append({
+                            "name": h.get("hotelName") or h.get("name") or f"{destination}酒店",
+                            "stars": int(h.get("star") or h.get("starLevel") or hotel_stars),
+                            "score": float(h.get("commentScore") or h.get("score") or 4.5),
+                            "price": int(h.get("lowestPrice") or h.get("price") or 400),
+                            "image": h.get("firstPic") or "🏨",
+                            "tag": h.get("business") or h.get("tag") or "近景点",
+                        })
+        except Exception:
+            pass
+        return out or _mock_hotels(destination, n_days, hotel_stars)
+
+    def _task_tickets():
+        out = []
+        if from_city:
+            try:
+                if _find_tuniu():
+                    train_args = {
+                        "fromCityName": from_city,
+                        "toCityName": destination,
+                        "departDate": depart_date or datetime.now().strftime("%Y-%m-%d"),
+                    }
+                    td = _tuniu_call("train", "searchLowestPriceTrain", train_args)
+                    if td and isinstance(td, dict):
+                        train_list = td.get("data", {}).get("trainList", []) if isinstance(td.get("data"), dict) else td.get("trains", []) or td.get("trainList", [])
+                        for t in train_list[:3]:
+                            out.append({
+                                "type": "train",
+                                "number": t.get("trainNumber") or t.get("number"),
+                                "from": from_city,
+                                "to": destination,
+                                "depart": t.get("departTime"),
+                                "arrive": t.get("arriveTime"),
+                                "price": int((t.get("price") or {}).get("edzPrice") or 0),
+                                "carrier": "高铁",
+                            })
+            except Exception:
+                pass
+        return out or _mock_trains(from_city, destination)
+
+    def _task_flights():
+        out = []
+        if from_city:
+            try:
+                if _find_tuniu():
+                    f_args = {"departCityName": from_city, "arriveCityName": destination, "departDate": depart_date or datetime.now().strftime("%Y-%m-%d")}
+                    fd = _tuniu_call("flight", "searchLowestPriceFlight", f_args)
+                    if fd and isinstance(fd, dict):
+                        flist = fd.get("data", {}).get("flightList", []) if isinstance(fd.get("data"), dict) else fd.get("flights", []) or fd.get("flightList", [])
+                        for f in flist[:2]:
+                            out.append({
+                                "type": "flight",
+                                "number": f.get("flightNo") or f.get("number"),
+                                "from": from_city,
+                                "to": destination,
+                                "depart": f.get("departTime"),
+                                "arrive": f.get("arriveTime"),
+                                "price": int(f.get("lowestPrice") or f.get("price") or 0),
+                                "carrier": f.get("carrierName") or "航空",
+                            })
+            except Exception:
+                pass
+        return out or _mock_flights(from_city, destination)
+
+    def _task_pois():
+        pool, seen = [], set()
+        for kw in ["景点", "文化", "公园", "博物馆", "古镇", "美食", "夜景"]:
+            for _p in _search_poi(destination, kw, offset=4):
+                if _p["name"] and _p["name"] not in seen:
+                    seen.add(_p["name"])
+                    pool.append(_p)
+            if len(pool) >= n_days * 2 + 2:
+                break
+        return pool
+
+    _ex = _cf.ThreadPoolExecutor(max_workers=5)
+    _fut = {
+        "weather": _ex.submit(_task_weather),
+        "hotels": _ex.submit(_task_hotels),
+        "tickets": _ex.submit(_task_tickets),
+        "flights": _ex.submit(_task_flights),
+        "pois": _ex.submit(_task_pois),
+    }
+
+    def _get(key, default):
+        try:
+            return _fut[key].result(timeout=60)
+        except Exception:
+            return default
+
+    weather = _get("weather", None)
+    hotels = _get("hotels", []) or _mock_hotels(destination, n_days, hotel_stars)
+    tickets = _get("tickets", []) or _mock_trains(from_city, destination)
+    flights = _get("flights", []) or _mock_flights(from_city, destination)
+    attraction_pool = _get("pois", [])
+    _ex.shutdown(wait=False)  # 结果已取回，释放线程池（不等待，避免拖慢）
 
     # ---- 用户指定酒店：显式 selected_hotel 优先，其次从 extra_notes 提取 ----
     specified_hotel = (selected_hotel or "").strip() or (_extract_specified_hotel(extra_notes) if extra_notes else "")
     if specified_hotel:
+        d_hotel = selected_hotel_detail or {}
+
+        def _apply_hotel_detail(item: dict) -> dict:
+            """用用户在酒店页选定时的真实信息覆盖（价格/评分/星级/商圈/地址/图片）"""
+            if not d_hotel:
+                return item
+            if d_hotel.get("price") is not None:
+                item["price"] = d_hotel["price"]
+            if d_hotel.get("score") is not None:
+                item["score"] = d_hotel["score"]
+            if d_hotel.get("starName"):
+                item["starName"] = d_hotel["starName"]
+            if d_hotel.get("business"):
+                item["business"] = d_hotel["business"]
+            if d_hotel.get("address"):
+                item["address"] = d_hotel["address"]
+            if d_hotel.get("pic"):
+                item["image"] = d_hotel["pic"]
+            return item
+
         # 如果结果里已经有同名酒店，提到最前并标记「您指定」
         hit = next((i for i, h in enumerate(hotels) if specified_hotel in (h.get("name") or "")), -1)
         if hit >= 0:
+            # 注意：列表里的同名酒店来自搜索接口，信息可能和用户实际选的不一致
+            # （价格/评分不同），必须用 detail 覆盖，否则会出现"选了却显示别的价格"
             item = hotels.pop(hit)
             item["user_specified"] = True
             item["tag"] = "您指定"
-            hotels.insert(0, item)
+            hotels.insert(0, _apply_hotel_detail(item))
         else:
             base = {
                 "name": specified_hotel,
@@ -632,59 +769,40 @@ def plan_trip(
                 "tag": "您指定",
                 "user_specified": True,
             }
-            # 用户在酒店页选定时的真实信息优先（价格/评分/星级/商圈/图片）
-            d = selected_hotel_detail or {}
-            if d.get("price") is not None:
-                base["price"] = d["price"]
-            if d.get("score") is not None:
-                base["score"] = d["score"]
-            if d.get("starName"):
-                base["starName"] = d["starName"]
-            if d.get("business"):
-                base["business"] = d["business"]
-            if d.get("address"):
-                base["address"] = d["address"]
-            if d.get("pic"):
-                base["image"] = d["pic"]
-            hotels.insert(0, base)
-
-    # ---------- 4) 真实车票/机票 → Mock 降级 ----------
-    tickets = []
-    if from_city:
-        try:
-            if _find_tuniu():
-                train_args = {
-                    "fromCityName": from_city,
-                    "toCityName": destination,
-                    "departDate": depart_date or datetime.now().strftime("%Y-%m-%d"),
-                }
-                td = _tuniu_call("train", "searchLowestPriceTrain", train_args)
-                if td and isinstance(td, dict):
-                    train_list = td.get("data", {}).get("trainList", []) if isinstance(td.get("data"), dict) else td.get("trains", []) or td.get("trainList", [])
-                    for t in train_list[:3]:
-                        tickets.append({
-                            "type": "train",
-                            "number": t.get("trainNumber") or t.get("number"),
-                            "from": from_city,
-                            "to": destination,
-                            "depart": t.get("departTime"),
-                            "arrive": t.get("arriveTime"),
-                            "price": int((t.get("price") or {}).get("edzPrice") or 0),
-                            "carrier": "高铁",
-                        })
-        except Exception:
-            pass
-    if not tickets:
-        tickets = _mock_trains(from_city, destination)
+            hotels.insert(0, _apply_hotel_detail(base))
 
     # ---- 用户指定车次：显式 selected_ticket 优先，其次从 extra_notes 提取 ----
     specified_train = (selected_ticket or "").strip() or (_extract_specified_train(extra_notes) if extra_notes else "")
     if specified_train and from_city:
+        d_train = selected_ticket_detail or {}
+
+        def _apply_ticket_detail(item: dict) -> dict:
+            """用用户在车票页选定时的真实信息覆盖（站点/时刻/票价/车型/耗时）"""
+            if not d_train:
+                return item
+            if d_train.get("from"):
+                item["from"] = d_train["from"]
+            if d_train.get("to"):
+                item["to"] = d_train["to"]
+            if d_train.get("depart"):
+                item["depart"] = d_train["depart"]
+            if d_train.get("arrive"):
+                item["arrive"] = d_train["arrive"]
+            if d_train.get("price") is not None:
+                item["price"] = d_train["price"]
+            if d_train.get("category"):
+                item["carrier"] = d_train["category"]
+            if d_train.get("duration"):
+                item["duration"] = d_train["duration"]
+            return item
+
         hit = next((i for i, t in enumerate(tickets) if (t.get("number") or "").upper() == specified_train.upper()), -1)
         if hit >= 0:
+            # 同理：列表里同车次的信息（如 mock 的 08:30 出发）和用户实际选的
+            # （如 07:15 出发）可能不同，必须用 detail 覆盖
             item = tickets.pop(hit)
             item["user_specified"] = True
-            tickets.insert(0, item)
+            tickets.insert(0, _apply_ticket_detail(item))
         else:
             base = {
                 "type": "train",
@@ -697,61 +815,10 @@ def plan_trip(
                 "carrier": "用户指定",
                 "user_specified": True,
             }
-            # 用户在车票页选定时的真实信息优先（站点/时刻/票价/车型/耗时）
-            d = selected_ticket_detail or {}
-            if d.get("from"):
-                base["from"] = d["from"]
-            if d.get("to"):
-                base["to"] = d["to"]
-            if d.get("depart"):
-                base["depart"] = d["depart"]
-            if d.get("arrive"):
-                base["arrive"] = d["arrive"]
-            if d.get("price") is not None:
-                base["price"] = d["price"]
-            if d.get("category"):
-                base["carrier"] = d["category"]
-            if d.get("duration"):
-                base["duration"] = d["duration"]
-            tickets.insert(0, base)
+            tickets.insert(0, _apply_ticket_detail(base))
 
-    flights = []
-    if from_city:
-        try:
-            if _find_tuniu():
-                f_args = {"departCityName": from_city, "arriveCityName": destination, "departDate": depart_date or datetime.now().strftime("%Y-%m-%d")}
-                fd = _tuniu_call("flight", "searchLowestPriceFlight", f_args)
-                if fd and isinstance(fd, dict):
-                    flist = fd.get("data", {}).get("flightList", []) if isinstance(fd.get("data"), dict) else fd.get("flights", []) or fd.get("flightList", [])
-                    for f in flist[:2]:
-                        flights.append({
-                            "type": "flight",
-                            "number": f.get("flightNo") or f.get("number"),
-                            "from": from_city,
-                            "to": destination,
-                            "depart": f.get("departTime"),
-                            "arrive": f.get("arriveTime"),
-                            "price": int(f.get("lowestPrice") or f.get("price") or 0),
-                            "carrier": f.get("carrierName") or "航空",
-                        })
-        except Exception:
-            pass
-    if not flights:
-        flights = _mock_flights(from_city, destination)
-
-    # ---------- 5) 推荐景点（真实高德 POI，按 7 个关键词去重）----------
-    attraction_pool: list = []
-    seen_names: set = set()
-    for kw in ["景点", "文化", "公园", "博物馆", "古镇", "美食", "夜景"]:
-        pois = _search_poi(destination, kw, offset=4)
-        for _p in pois:
-            if _p["name"] and _p["name"] not in seen_names:
-                seen_names.add(_p["name"])
-                attraction_pool.append(_p)
-        if len(attraction_pool) >= n_days * 2 + 2:
-            break
+    # ---- 景点兜底 + 截取 ----
     if not attraction_pool:
-        # 兜底：调一次景点
         attraction_pool = _search_poi(destination, "景点", offset=8)
     attractions = attraction_pool[: min(n_days * 2, len(attraction_pool))]
 
@@ -789,6 +856,14 @@ def plan_trip(
         },
     ]
 
+    # ---- 用户选定的酒店对所有档位生效 ----
+    # 默认 orders：经济档用 hotels[0]、舒适档用 hotels[1]、豪华档用 hotels[-1]。
+    # 用户选定的酒店虽然被置顶到 hotels[0]，但如果不覆盖，**只有经济档**会用它，
+    # 用户切到默认的「舒适档」看到的仍是别的酒店 → 表现为"选定了却没用上"。
+    if specified_hotel and hotels and hotels[0].get("user_specified"):
+        for p in plans:
+            p["hotel"] = hotels[0]
+
     # ---------- 7) 行程时刻表（按选档填具体景点）----------
     itinerary_per_tier = {
         p["tier"]: _plan_days(p["attractions"], n_days, destination) for p in plans
@@ -796,6 +871,7 @@ def plan_trip(
 
     # ---------- 8) 大模型总结（单次调用，一次返回总结+3档文案，失败降级为 None）----------
     ai_summary = None
+    extra_note_reply = ""  # 针对用户「额外要求」的回应（用于详情页展示）
     try:
         spot_names = []
         for a in attractions[:6]:
@@ -832,16 +908,21 @@ def plan_trip(
             f"\"summary\":\"一句 40 字以内的整体推荐语\","
             f"\"economy\":\"经济档一句15字内卖点\","
             f"\"comfort\":\"舒适档一句15字内卖点\","
-            f"\"luxury\":\"豪华档一句15字内卖点\""
+            f"\"luxury\":\"豪华档一句15字内卖点\","
+            f"\"dining\":\"本地餐饮建议，30字以内，必须包含 3-5 个具体的当地特色美食名称\","
+            f"\"note_reply\":\"针对用户额外要求的一句话回应；没有额外要求时填空字符串\""
             f"}}\n"
             f"目的地：{destination}，{n_days}天，预算¥{budget}，天气：{weather_desc or '未知'}，出行：{companion}\n"
             f"三个档位：{tier_info}"
             f"{notes_section}\n"
-            f"如果用户提到了具体车次（如 Z375、G1234），summary 中必须**原样提到**这个车次号，"
-            f"不要用别的车次代替。\n"
-            f"如果用户提到了具体酒店名（如金陵东路桔子水晶），summary 中必须**原样提到**这个酒店，"
-            f"不要用其他酒店名代替。\n"
-            f"如果用户提到了饮食禁忌/特殊偏好，summary 应适当呼应。"
+            f"硬性要求：\n"
+            f"1. 如果用户提到了具体车次（如 Z375、G1234），summary 中必须**原样提到**这个车次号，不要用别的车次代替。\n"
+            f"2. 如果用户提到了具体酒店名（如金陵东路桔子水晶），summary 中必须**原样提到**这个酒店，不要用其他酒店名代替。\n"
+            f"3. dining 字段：结合「{destination}」与用户额外要求，给出**具体**的当地特色美食名称"
+            f"（例如「生煎、小笼包、蟹壳黄」，不要写「特色美食」这类泛称）。\n"
+            f"4. note_reply 字段：用一句话说明你如何落实了用户的额外要求"
+            f"（如「已按您的要求安排了本地特色美食推荐」）；用户没有额外要求时填空字符串。\n"
+            f"5. 所有推荐必须是真实存在的，不得编造。"
         )
         raw = _ai_summarize(summary_prompt)
         if raw:
@@ -852,10 +933,16 @@ def plan_trip(
                 ai_summary = obj.get("summary")
                 # 把档位文案写回 plans
                 tier_map = {"经济档": "economy", "舒适档": "comfort", "豪华档": "luxury"}
+                llm_dining = (obj.get("dining") or "").strip()
                 for p in plans:
                     key = tier_map.get(p["tier"])
                     if key and obj.get(key):
                         p["ai_highlight"] = obj[key]
+                    # 用 LLM 基于「目的地 + 额外要求」生成的本地餐饮建议，
+                    # 覆盖原先硬编码的 "本帮菜+特色美食" 模板
+                    if llm_dining:
+                        p["dining"] = llm_dining
+                extra_note_reply = (obj.get("note_reply") or "").strip()
             else:
                 # 没有 JSON，直接把整段当总结
                 ai_summary = raw
@@ -877,6 +964,7 @@ def plan_trip(
         "depart_date": depart_date,
         "companion": companion,
         "extra_notes": extra_notes,
+        "extra_note_reply": extra_note_reply,
         "selected_hotel": specified_hotel,
         "selected_ticket": specified_train,
         "selected_hotel_detail": selected_hotel_detail,

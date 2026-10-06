@@ -395,6 +395,8 @@ export function HotelsPanel(): React.ReactNode {
                   <img
                     src={tuniuHd(h.pic)}
                     alt={h.name}
+                    referrerPolicy="no-referrer"
+                    loading="lazy"
                     className="h-full w-full object-cover"
                     onError={(e) => {
                       const el = e.target as HTMLImageElement;
@@ -444,21 +446,28 @@ export function HotelsPanel(): React.ReactNode {
                     )}
                     {h.meal && <span className="ml-1 text-[10px] text-emerald-600">{h.meal}</span>}
                   </div>
-                  {pickMode ? (
+                  <div className="flex items-center gap-1.5">
+                    {/* 非 pick 模式也提供入口：从侧边栏直接进来时也能把酒店加入行程 */}
+                    {!pickMode && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handlePick(h); }}
+                        title="把这间酒店加入「新建行程」"
+                        className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 px-2 py-1 text-xs font-medium text-indigo-600 transition-colors hover:bg-indigo-50"
+                      >
+                        <Plus className="size-3" /> 行程
+                      </button>
+                    )}
                     <button
-                      onClick={(e) => { e.stopPropagation(); handlePick(h); }}
-                      className="inline-flex items-center gap-1 rounded-lg bg-indigo-500 px-3 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90"
-                    >
-                      <Plus className="size-3" /> 加入行程
-                    </button>
-                  ) : (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleBook(h); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (pickMode) handlePick(h);
+                        else handleBook(h);
+                      }}
                       className="rounded-lg bg-indigo-500 px-3 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90"
                     >
-                      预订
+                      {pickMode ? "加入行程" : "预订"}
                     </button>
-                  )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -511,6 +520,7 @@ export function HotelsPanel(): React.ReactNode {
                             <img
                               src={hdUrl}
                               alt={selectedHotel.name}
+                              referrerPolicy="no-referrer"
                               className="aspect-[4/3] w-full object-cover"
                               onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                             />
@@ -527,6 +537,7 @@ export function HotelsPanel(): React.ReactNode {
                               key={i}
                               src={u}
                               alt={`环境图 ${i + 1}`}
+                              referrerPolicy="no-referrer"
                               className="h-14 w-20 shrink-0 cursor-pointer rounded-md border border-gray-200 object-cover hover:border-indigo-400"
                               onClick={(e) => {
                                 // 点击缩略图换主图：把当前图与第一张交换
@@ -640,6 +651,7 @@ export function HotelsPanel(): React.ReactNode {
                                       <img
                                         src={room.pic}
                                         alt={roomName}
+                                        referrerPolicy="no-referrer"
                                         className="size-full object-cover"
                                         onError={(e) => {
                                           const el = e.target as HTMLImageElement;
@@ -699,22 +711,28 @@ export function HotelsPanel(): React.ReactNode {
                   )}
 
                   {/* 操作按钮 */}
-                  <div className="flex gap-3">
+                  <div className="flex flex-wrap gap-2">
                     <button
                       onClick={() => { setSelectedHotel(null); }}
-                      className="flex-1 rounded-xl border border-gray-200 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                      className="rounded-xl border border-gray-200 px-5 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
                     >
                       关闭
                     </button>
                     <button
-                      onClick={() => {
-                        if (pickMode) handlePick(selectedHotel);
-                        else handleBook(detail || selectedHotel);
-                      }}
-                      className="flex-1 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                      onClick={() => handlePick(selectedHotel)}
+                      title="把这间酒店加入「新建行程」"
+                      className="flex-1 rounded-xl border border-indigo-300 py-2.5 text-sm font-semibold text-indigo-600 transition-colors hover:bg-indigo-50"
                     >
-                      {pickMode ? "➕ 加入行程" : `立即预订 ¥${selectedHotel.price ?? "—"}`}
+                      ➕ 加入行程
                     </button>
+                    {!pickMode && (
+                      <button
+                        onClick={() => handleBook(detail || selectedHotel)}
+                        className="flex-1 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-500 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                      >
+                        立即预订 ¥{selectedHotel.price ?? "—"}
+                      </button>
+                    )}
                   </div>
                 </>
               )}

@@ -643,12 +643,22 @@ export function TicketsPanel(): React.ReactNode {
                       </button>
                     </>
                   ) : (
-                    <button
-                      onClick={() => openDetail(t)}
-                      className="rounded-lg bg-indigo-500 px-4 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
-                    >
-                      预订
-                    </button>
+                    <>
+                      {/* 非 pick 模式也提供入口：从侧边栏直接进来时也能加入行程 */}
+                      <button
+                        onClick={() => handlePick(t)}
+                        title="把这趟车次加入「新建行程」"
+                        className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 px-2 py-1.5 text-xs font-medium text-indigo-600 transition-colors hover:bg-indigo-50"
+                      >
+                        <Plus className="size-3" /> 行程
+                      </button>
+                      <button
+                        onClick={() => openDetail(t)}
+                        className="rounded-lg bg-indigo-500 px-4 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                      >
+                        预订
+                      </button>
+                    </>
                   )}
                 </div>
               </div>

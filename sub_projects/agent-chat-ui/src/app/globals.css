@@ -170,3 +170,15 @@ body {
     box-shadow: inset 9px 0 6px -1px rgb(0 0 0 / 0.02);
   }
 }
+
+/* 保存成功弹窗的弹出动画（配合 animate-[popIn_...] 使用） */
+@keyframes popIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

@@ -40,6 +40,7 @@ import {
   MapPin,
   X,
   Check,
+  CheckCircle2,
   ImageDown,
 } from "lucide-react";
 import { toPng } from "html-to-image";
@@ -47,6 +48,9 @@ import { TopBar } from "@/components/workspace/TopBar";
 import { Sidebar } from "@/components/workspace/Sidebar";
 import { TicketsPanel } from "@/components/workspace/TicketsPanel";
 import { HotelsPanel } from "@/components/workspace/HotelsPanel";
+import { ToursPanel } from "@/components/workspace/ToursPanel";
+import { CarRentalPanel } from "@/components/workspace/CarRentalPanel";
+import { InsurancePanel } from "@/components/workspace/InsurancePanel";
 import { ItineraryPanel } from "@/components/workspace/ItineraryPanel";
 import { TripExportCard } from "@/components/workspace/TripExportCard";
 import { ChatDock } from "@/components/workspace/ChatDock";
@@ -406,6 +410,15 @@ function clearDraft(): void {
   }
 }
 
+/** 按已用时推演生成阶段，给用户「正在进展」的感知（后端是单次请求，无法拿到真实阶段） */
+function genStage(sec: number): { icon: string; text: string } {
+  if (sec < 3) return { icon: "🧭", text: "正在解析你的需求…" };
+  if (sec < 10) return { icon: "🏨", text: "正在查询酒店、车票与航班…" };
+  if (sec < 18) return { icon: "🗺️", text: "正在检索目的地景点…" };
+  if (sec < 45) return { icon: "✨", text: "AI 正在撰写行程亮点与餐饮建议…" };
+  return { icon: "⏳", text: "AI 生成较慢，仍在努力中，请再稍等片刻…" };
+}
+
 function CreateTripPanel({
   onNavigate,
   onGenerated,
@@ -434,31 +447,63 @@ function CreateTripPanel({
   const [selectedHotel, setSelectedHotel] = useState<HotelPick | null>(() => normalizeHotelPick(loadDraft().selectedHotel));
   const [selectedTicket, setSelectedTicket] = useState<TicketPick | null>(() => normalizeTicketPick(loadDraft().selectedTicket));
   const [submitting, setSubmitting] = useState(false);
+  // 生成已用时（秒）。后端要查酒店/车票/景点再调 LLM 写文案，实测约 30~60 秒，
+  // 没有反馈用户会以为卡死，所以这里做阶段化进度提示。
+  const [elapsed, setElapsed] = useState(0);
+
+  // 生成中：每秒刷新计时
+  useEffect(() => {
+    if (!submitting) {
+      setElapsed(0);
+      return;
+    }
+    const t0 = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 500);
+    return () => clearInterval(id);
+  }, [submitting]);
 
   // 从「选择酒店 / 车次」页返回时回填
+  // 说明：正常情况下 tab 切换会让本组件重新挂载，effect 立即读到 pending pick。
+  // 但为防"组件没重新挂载 / 时序竞态"导致丢数据，这里挂了兜底轮询（最多 5 秒）。
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = localStorage.getItem(PENDING_PICK_KEY);
-      if (!raw) return;
-      const obj: PendingPick = JSON.parse(raw);
-      if (obj?.kind === "hotel" && obj.value) {
-        const h = normalizeHotelPick(obj.value);
-        if (h) {
-          setSelectedHotel(h);
-          toast.success(`已加入酒店：${h.name}`);
+    let stopped = false;
+
+    const consume = (): boolean => {
+      if (stopped || typeof window === "undefined") return false;
+      try {
+        const raw = localStorage.getItem(PENDING_PICK_KEY);
+        if (!raw) return false;
+        const obj: PendingPick = JSON.parse(raw);
+        if (obj?.kind === "hotel" && obj.value) {
+          const h = normalizeHotelPick(obj.value);
+          if (h) {
+            setSelectedHotel(h);
+            toast.success(`已加入酒店：${h.name}`);
+          }
+        } else if (obj?.kind === "ticket" && obj.value) {
+          const t = normalizeTicketPick(obj.value);
+          if (t) {
+            setSelectedTicket(t);
+            toast.success(`已加入车次：${t.number}${t.from ? ` ${t.from}→${t.to}` : ""}`);
+          }
         }
-      } else if (obj?.kind === "ticket" && obj.value) {
-        const t = normalizeTicketPick(obj.value);
-        if (t) {
-          setSelectedTicket(t);
-          toast.success(`已加入车次：${t.number}${t.from ? ` ${t.from}→${t.to}` : ""}`);
-        }
+        localStorage.removeItem(PENDING_PICK_KEY);
+        return true;
+      } catch {
+        return false;
       }
-      localStorage.removeItem(PENDING_PICK_KEY);
-    } catch {
-      /* ignore */
-    }
+    };
+
+    if (consume()) return;
+
+    const t0 = Date.now();
+    const id = setInterval(() => {
+      if (consume() || Date.now() - t0 > 5000) clearInterval(id);
+    }, 400);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
   }, []);
 
   // 任一字段变化 → 写回 localStorage（防抖合并为 1 次）
@@ -506,11 +551,15 @@ function CreateTripPanel({
         selected_hotel_detail: selectedHotel,
         selected_ticket_detail: selectedTicket,
       };
+      // 加超时保护：模型慢时可能 40~60s，上限 150s，避免无限等待
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 150000);
       const res = await fetch("http://localhost:8000/trip/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-      });
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timer));
       const data = await res.json();
       if (res.ok && data.status === "success") {
         // 成功生成 → 清空草稿（避免下次打开还看到上一轮填了一半的内容）
@@ -539,8 +588,12 @@ function CreateTripPanel({
       } else {
         toast.error(data.message || "生成失败");
       }
-    } catch {
-      toast.error("无法连接后端（localhost:8000），请确认 FastAPI 已启动");
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        toast.error("生成超时（超过 150 秒），请重试；若反复超时请检查后端日志与模型服务");
+      } else {
+        toast.error("无法连接后端（localhost:8000），请确认 FastAPI 已启动");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -935,6 +988,38 @@ function CreateTripPanel({
             {submitting ? "生成中…" : "✨ 点击生成行程"}
           </button>
 
+          {/* 生成进度：后端单次请求约 30~60 秒，这里做阶段化提示避免用户以为卡死 */}
+          {submitting && (() => {
+            const st = genStage(elapsed);
+            return (
+              <div className="rounded-xl border border-indigo-100 bg-indigo-50/70 p-4">
+                <div className="flex items-start gap-3">
+                  <LoaderCircle className="mt-0.5 size-5 shrink-0 animate-spin text-indigo-500" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-indigo-700">
+                      {st.icon} {st.text}
+                    </div>
+                    <div className="mt-1 text-xs text-indigo-400">
+                      已用时 <span className="font-semibold text-indigo-500">{elapsed}</span> 秒 ·
+                      通常需要 30~60 秒（受模型生成速度影响）
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-indigo-100">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-purple-400 transition-all duration-500"
+                    style={{ width: `${Math.min(96, Math.round((elapsed / 50) * 100))}%` }}
+                  />
+                </div>
+                {elapsed >= 45 && (
+                  <p className="mt-2 text-[11px] leading-relaxed text-indigo-400">
+                    模型较慢时可能超过 1 分钟，请不要关闭页面；行程数据（酒店/车票/景点）已查好，正在生成 AI 文案。
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+
           {/* 草稿操作：用户主动重置已填的字段 */}
           <div className="flex items-center justify-between text-xs text-gray-400">
             <span>已自动保存草稿，切走再回来不丢失</span>
@@ -1197,6 +1282,9 @@ function TripDetailPanel({ onNavigate }: { onNavigate: (tab: string) => void }) 
   const [trip, setTrip] = useState<any>(null);
   const [selectedTier, setSelectedTier] = useState<string>("");
   const [activeDay, setActiveDay] = useState<number>(0); // 0=总览, 1..n=第N天
+  // 保存到「我的行程」：成功后的弹窗 + 按钮 loading 态
+  const [savedModal, setSavedModal] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // 从 sessionStorage 取之前选档的结果
   useEffect(() => {
@@ -1237,6 +1325,11 @@ function TripDetailPanel({ onNavigate }: { onNavigate: (tab: string) => void }) 
   const destGeo = data.destination_geo;
   const fromGeo = data.from_geo;
   const n_days = data.n_days || 3;
+
+  // 住宿展示优先级：用户选定的（user_specified）> 当前档位 > 列表第一项
+  // （后端已让选定酒店对所有档位生效，这里再兜一层，兼容旧数据）
+  const pickedHotel = (hotels as any[]).find((h: any) => h?.user_specified);
+  const displayHotel = pickedHotel || selectedPlan?.hotel || hotels[0];
 
   // 预算拆分（按档位估算，兼容多种数据来源）
   // 来源 1: 完整 plan（最准）来源 2: trip.budget 来源 3: payload.budget 来源 4: 默认 5000
@@ -1289,31 +1382,40 @@ function TripDetailPanel({ onNavigate }: { onNavigate: (tab: string) => void }) 
             <button onClick={() => onNavigate("select-plan")} className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-gray-200 hover:bg-white/10">
               ← 换档
             </button>
-            <button onClick={async () => {
-              if (!data.share_id) { toast.error("行程数据未加载，请重试"); return; }
-              const userRaw = localStorage.getItem("fy_user");
-              if (!userRaw) { toast.error("请先登录"); return; }
-              let user;
-              try { user = JSON.parse(userRaw); } catch { toast.error("用户信息损坏，请重新登录"); return; }
-              if (!user || !user.id) { toast.error("用户 ID 缺失，请重新登录"); return; }
-              try {
-                const res = await fetch("http://localhost:8000/trip/save", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ share_id: data.share_id, creator_id: user.id, tier: selectedTier || "舒适档" }),
-                });
-                const json = await res.json();
-                if (json.status === "success") {
-                  toast.success("✅ 已保存到「我的行程」");
-                } else {
-                  toast.error("保存失败：" + (json.message || "未知错误"));
+            <button
+              disabled={saving}
+              onClick={async () => {
+                if (saving) return;
+                if (!data.share_id) { toast.error("行程数据未加载，请重试"); return; }
+                const userRaw = localStorage.getItem("fy_user");
+                if (!userRaw) { toast.error("请先登录"); return; }
+                let user;
+                try { user = JSON.parse(userRaw); } catch { toast.error("用户信息损坏，请重新登录"); return; }
+                if (!user || !user.id) { toast.error("用户 ID 缺失，请重新登录"); return; }
+                setSaving(true);
+                try {
+                  const res = await fetch("http://localhost:8000/trip/save", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ share_id: data.share_id, creator_id: user.id, tier: selectedTier || "舒适档" }),
+                  });
+                  const json = await res.json();
+                  if (json.status === "success") {
+                    // 弹出「保存成功」效果
+                    setSavedModal(true);
+                  } else {
+                    toast.error("保存失败：" + (json.message || "未知错误"));
+                  }
+                } catch (e) {
+                  console.error("save trip error", e);
+                  toast.error("保存失败，请确认后端已启动 (localhost:8000)");
+                } finally {
+                  setSaving(false);
                 }
-              } catch (e) {
-                console.error("save trip error", e);
-                toast.error("保存失败，请确认后端已启动 (localhost:8000)");
-              }
-            }} className="rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/30">
-              💾 保存到我的行程
+              }}
+              className="rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {saving ? "保存中…" : "💾 保存到我的行程"}
             </button>
             <button onClick={() => {
               if (data.share_id) {
@@ -1411,9 +1513,19 @@ function TripDetailPanel({ onNavigate }: { onNavigate: (tab: string) => void }) 
               </div>
             )}
             <div className="rounded-lg bg-purple-500/15 p-2.5">
-              <div className="text-[10px] text-purple-300">🏨 住宿</div>
-              <div className="mt-1 text-xs font-medium text-white">{selectedPlan?.hotel?.name || hotels[0]?.name || "推荐酒店"}</div>
-              <div className="text-[10px] text-purple-200/70">{selectedPlan?.hotel?.stars || trip.hotelStars}星 · ¥{selectedPlan?.hotel?.price || hotels[0]?.price}/晚</div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-purple-300">🏨 住宿</span>
+                {pickedHotel && (
+                  <span className="rounded-full bg-indigo-500/25 px-1.5 py-0.5 text-[9px] text-indigo-200">
+                    您指定
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-xs font-medium text-white">{displayHotel?.name || "推荐酒店"}</div>
+              <div className="text-[10px] text-purple-200/70">
+                {displayHotel?.stars || trip.hotelStars}星 · ¥{displayHotel?.price || "—"}/晚
+                {displayHotel?.score ? ` · ${displayHotel.score}分` : ""}
+              </div>
               <div className="mt-0.5 text-[10px] text-gray-400">共 {n_days - 1} 晚</div>
             </div>
             <div className="rounded-lg bg-pink-500/15 p-2.5">
@@ -1430,6 +1542,22 @@ function TripDetailPanel({ onNavigate }: { onNavigate: (tab: string) => void }) 
                 <div className="mt-0.5 text-[10px] text-gray-400">{weather.city} {weather.now.temp_C}°C · {weather.now.desc}</div>
               )}
             </div>
+
+            {/* 用户填写的「额外要求」 + AI 的落实说明 */}
+            {data.extra_notes && (
+              <div className="rounded-lg border border-indigo-400/30 bg-indigo-500/10 p-2.5">
+                <div className="text-[10px] text-indigo-300">💬 您的额外要求</div>
+                <div className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-indigo-100">
+                  {data.extra_notes}
+                </div>
+                {data.extra_note_reply && (
+                  <div className="mt-1.5 flex items-start gap-1 text-[10px] leading-relaxed text-emerald-300">
+                    <span>✅</span>
+                    <span>{data.extra_note_reply}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1558,6 +1686,52 @@ function TripDetailPanel({ onNavigate }: { onNavigate: (tab: string) => void }) 
           </div>
         </div>
       </div>
+
+      {/* ============ 保存成功弹窗 ============ */}
+      {savedModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onClick={() => setSavedModal(false)}
+        >
+          <div
+            className="w-full max-w-sm overflow-hidden rounded-2xl bg-white text-center shadow-2xl animate-[popIn_0.28s_cubic-bezier(0.34,1.56,0.64,1)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 顶部绿色渐变 + 对勾 */}
+            <div className="bg-gradient-to-br from-emerald-500 to-teal-500 px-6 pb-6 pt-7">
+              <div className="mx-auto flex size-16 items-center justify-center rounded-full bg-white/20 ring-4 ring-white/25">
+                <CheckCircle2 className="size-10 text-white animate-[popIn_0.4s_0.08s_both_cubic-bezier(0.34,1.56,0.64,1)]" />
+              </div>
+              <h3 className="mt-4 text-lg font-bold text-white">保存成功</h3>
+              <p className="mt-1 text-xs text-emerald-50">
+                {data.destination
+                  ? `${data.from_city ? `${data.from_city} → ` : ""}${data.destination}${data.days ? ` · ${data.days}` : ""}`
+                  : "行程已添加"}
+              </p>
+            </div>
+
+            <div className="px-6 py-5">
+              <p className="text-sm text-gray-600">
+                已添加到「我的行程」，可随时查看、分享或导出图片。
+              </p>
+              <div className="mt-5 flex gap-3">
+                <button
+                  onClick={() => setSavedModal(false)}
+                  className="flex-1 rounded-xl border border-gray-200 py-2.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
+                >
+                  继续浏览
+                </button>
+                <button
+                  onClick={() => { setSavedModal(false); onNavigate("trips"); }}
+                  className="flex-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                >
+                  去我的行程
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2664,6 +2838,10 @@ function WorkspaceContent(): React.ReactNode {
           {tab === "trip-detail" && <TripDetailPanel onNavigate={handleNavigate} />}
           {tab === "trips" && <TripsPanel onNavigate={handleNavigate} />}
           {tab === "hotels" && <HotelsPanel />}
+          {/* 其他服务：旅游团（途牛 holiday） / 租车（高德 POI + 途牛自驾游） / 保险（AI 建议） */}
+          {tab === "tours" && <ToursPanel />}
+          {tab === "car-rental" && <CarRentalPanel />}
+          {tab === "insurance" && <InsurancePanel />}
           {tab === "map" && <MapPanel />}
           {tab === "settings" && <SettingsPanel />}
           {tab === "help" && <HelpPanel />}

@@ -91,15 +91,33 @@ async function runTuniu(server: string, tool: string, args: object): Promise<str
   }
   const rt = resolveTuniuRuntime();
   const fullArgs = [...rt.args, "call", server, tool, "-a", JSON.stringify(args)];
-  const { stdout, stderr } = await execFileAsync(rt.cmd, fullArgs, {
-    timeout: 60000,
-    maxBuffer: 20 * 1024 * 1024,
-    env,
-  });
-  if (stderr) {
-    console.warn("[tuniu] stderr:", stderr.slice(0, 500));
+
+  // Windows 上 tuniu CLI（Node 子进程）偶发崩溃：
+  //   Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c
+  // 属于 libuv 的已知竞态，重试一次即可恢复；业务错误不重试。
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const { stdout, stderr } = await execFileAsync(rt.cmd, fullArgs, {
+        timeout: 60000,
+        maxBuffer: 20 * 1024 * 1024,
+        env,
+      });
+      if (stderr) {
+        console.warn("[tuniu] stderr:", stderr.slice(0, 500));
+      }
+      return stdout;
+    } catch (e: any) {
+      lastErr = e;
+      const msg = String(e?.message || e?.stderr || "");
+      const transient = /Assertion failed|UV_HANDLE_CLOSING|UV_HANDLE_CLOSED/.test(msg);
+      if (!transient) throw e;
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
   }
-  return stdout;
+  throw lastErr;
 }
 
 // 途牛返回结构：{ success, result: { content: [ { type:"text", text:"<json string>" } ] } }
@@ -397,6 +415,111 @@ function normalizeFlightDetail(result: any): any {
   };
 }
 
+// 归一化度假产品（holiday.searchHolidayList → 跟团/自助游/自驾游 产品列表）
+function normalizeHolidays(result: any): { rows: any[]; count: number } {
+  const d = result?.data ?? {};
+  const rows = Array.isArray(d?.rows) ? d.rows : [];
+  return {
+    count: typeof d?.count === "number" ? d.count : rows.length,
+    rows: rows.map((r: any, i: number) => ({
+      id: `holiday-${r?.productId ?? i}`,
+      productId: r?.productId ?? "",
+      name: r?.productName || "",
+      price: toNumber(r?.price),
+      tourDay: r?.tourDay ?? null,
+      queryType: r?.queryType || "",
+      departCity: Array.isArray(r?.departCityName) ? r.departCityName.join(" / ") : r?.departCityName || "",
+      satisfaction: r?.satisfaction ?? null,
+      peopleNum: r?.peopleNum ?? null,
+      pic: r?.picUrl || "",
+      // customConditionName 里可能混着逗号拼接的复合串，过滤掉
+      tags: Array.isArray(r?.customConditionName)
+        ? r.customConditionName.filter((t: string) => t && !t.includes(",")).slice(0, 6)
+        : [],
+      brand: r?.brandTypeName || "",
+      // ↓ 以下 4 个是 getHolidayProductDetail 的必填参数，必须原样带过去
+      departCityCode: Array.isArray(r?.departCityCode) ? r.departCityCode : [0],
+      classBrandId: r?.classBrandId ?? 1,
+      proMode: r?.proMode ?? 1,
+      departsDateBegin: r?.departsDateBegin || "",
+      departsDateEnd: r?.departsDateEnd || "",
+    })),
+  };
+}
+
+// 去掉 HTML 标签 / 反转义常用实体
+function stripHtml(s: any): string {
+  return String(s ?? "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// 归一化度假产品详情（holiday.getHolidayProductDetail）
+function normalizeHolidayDetail(result: any): any {
+  const d = result?.data ?? result ?? {};
+  const cal = d?.productPriceCalendar || {};
+  const calRows = Array.isArray(cal?.rows) ? cal.rows : [];
+  const journeyRaw = Array.isArray(d?.journeySummary) ? d.journeySummary : [];
+  const pics = (Array.isArray(d?.productPicList) ? d.productPicList : [])
+    .map((p: any) => p?.path || "")
+    .filter(Boolean);
+  const conditions = (Array.isArray(d?.customCondition) ? d.customCondition : [])
+    .map((c: any) => c?.conditionName || "")
+    .filter(Boolean);
+
+  return {
+    productId: d?.productId ?? "",
+    name: stripHtml(d?.productName || ""),
+    departureCityName: d?.departureCityName || "",
+    duration: d?.duration ?? null,
+    productNight: d?.productNight ?? null,
+    saleModeName: d?.saleModeName || "",
+    characteristic: stripHtml(d?.characteristic || d?.characteristicWord || ""),
+    conditions,
+    pics,
+    calendarCount: cal?.count ?? calRows.length,
+    departures: calRows
+      .map((r: any) => ({
+        date: r?.departDate || "",
+        adultPrice: toNumber(r?.tuniuPrice),
+        childPrice: toNumber(r?.tuniuChildPrice),
+      }))
+      .filter((x: any) => x.date),
+    journey: journeyRaw.map((day: any) => ({
+      day: day?.day ?? null,
+      title: stripHtml(day?.title || ""),
+      modules: (Array.isArray(day?.moduleList) ? day.moduleList : [])
+        .map((m: any) => {
+          const type = m?.moduleType || "";
+          let text = "";
+          if (type === "hotel") {
+            text = (Array.isArray(m?.hotelList) ? m.hotelList : [])
+              .map((h: any) => h?.title || "")
+              .filter(Boolean)
+              .join(" / ");
+          } else if (type === "food") {
+            // hasList: 早/午/晚/夜宵/下午茶，has=成人是否含餐
+            const meals = (Array.isArray(m?.hasList) ? m.hasList : [])
+              .filter((x: any) => Number(x?.has) > 0)
+              .map((x: any) => x?.title || "")
+              .filter(Boolean);
+            text = meals.length ? `含餐：${meals.join("、")}` : "";
+          } else {
+            text = stripHtml(m?.description || m?.content || m?.title || "");
+          }
+          return { type, text };
+        })
+        .filter((m: any) => m.text),
+    })),
+  };
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const type = url.searchParams.get("type") || "train";
@@ -460,6 +583,96 @@ export async function GET(request: Request) {
         success: true,
         type: "hotel-detail",
         data: normalizeHotelDetail(result),
+      });
+    }
+
+    // ---------- 度假产品 / 旅游团（holiday：跟团 / 自助游 / 自驾游）----------
+    if (type === "holiday") {
+      const keyword = (url.searchParams.get("keyword") || "").trim();
+      const queryType = (url.searchParams.get("queryType") || "").trim(); // 跟团 | 自助游 | 自驾游
+      const departCity = (url.searchParams.get("departCity") || "").trim();
+      const tourDay = (url.searchParams.get("tourDay") || "").trim();
+      const lowPrice = (url.searchParams.get("lowPrice") || "").trim();
+      const highPrice = (url.searchParams.get("highPrice") || "").trim();
+      const pageNum = Math.max(1, Number(url.searchParams.get("pageNum") || "1") || 1);
+
+      if (!keyword && !queryType && !departCity) {
+        return NextResponse.json(
+          { success: false, error: "请至少填写目的地关键词、产品类型或出发城市之一" },
+          { status: 400 },
+        );
+      }
+
+      const args: any = { pageNum };
+      if (keyword) args.keyWord = keyword;
+      // queryTypeName 只接受精确枚举，传错会导致调用失败
+      if (["跟团", "自助游", "自驾游"].includes(queryType)) args.queryTypeName = queryType;
+      if (departCity) args.departCityName = departCity;
+      if (tourDay && /^\d+$/.test(tourDay)) args.tourDay = Number(tourDay);
+      if (lowPrice) args.lowPrice = Number(lowPrice);
+      if (highPrice) args.highPrice = Number(highPrice);
+
+      const raw = await runTuniu("holiday", "searchHolidayList", args);
+      const result = extractResult(raw);
+      if (result?.error) {
+        return NextResponse.json({ success: false, error: String(result.error) }, { status: 502 });
+      }
+      const { rows, count } = normalizeHolidays(result);
+      return NextResponse.json({
+        success: true,
+        type: "holiday",
+        data: rows,
+        count,
+        pageNum,
+        hasMore: rows.length >= 20,
+      });
+    }
+
+    // ---------- 度假产品详情（含团期价格日历 + 行程概览）----------
+    if (type === "holiday-detail") {
+      const productId = (url.searchParams.get("productId") || "").trim();
+      const classBrandId = (url.searchParams.get("classBrandId") || "").trim();
+      const proMode = (url.searchParams.get("proMode") || "").trim();
+      const departCityCodeRaw = (url.searchParams.get("departCityCode") || "").trim();
+      const ddb = (url.searchParams.get("departsDateBegin") || "").trim();
+      const dde = (url.searchParams.get("departsDateEnd") || "").trim();
+
+      if (!productId) {
+        return NextResponse.json({ success: false, error: "缺少参数：productId" }, { status: 400 });
+      }
+
+      // departCityCode 必须是数组，原样传递（服务端取首元素）
+      let departCityCode: number[] = [0];
+      if (departCityCodeRaw) {
+        try {
+          const parsed = JSON.parse(departCityCodeRaw);
+          if (Array.isArray(parsed) && parsed.length) departCityCode = parsed.map((n: any) => Number(n));
+        } catch {
+          /* 保持默认 */
+        }
+      }
+
+      const args: any = {
+        productId,
+        departCityCode,
+        classBrandParentId: Number(classBrandId || 1),
+        proMode: Number(proMode || 1),
+      };
+      // 仅当列表接口明确返回了这两个字段时才传（成对出现）
+      if (ddb && dde) {
+        args.departsDateBegin = ddb;
+        args.departsDateEnd = dde;
+      }
+
+      const raw = await runTuniu("holiday", "getHolidayProductDetail", args);
+      const result = extractResult(raw);
+      if (result?.error) {
+        return NextResponse.json({ success: false, error: String(result.error) }, { status: 502 });
+      }
+      return NextResponse.json({
+        success: true,
+        type: "holiday-detail",
+        data: normalizeHolidayDetail(result),
       });
     }
 

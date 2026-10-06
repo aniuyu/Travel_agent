@@ -1,5 +1,15 @@
 # 项目长期备忘（kunkun-models/ai_agent2 · 飞云通旅游平台）
 
+## 文档体系（三份 md，别写重复内容）
+
+| 文件 | 定位 | 面向 |
+|---|---|---|
+| `PROJECT_OVERVIEW.md` | 项目说明文档（技术细节、目录结构、快速开始） | 开发者 / 交接 |
+| `RESUME_PROJECT.md` | 简历项目描述（含项目背景 / 标准版 / 精简版 / 面试亮点表） | 简历投递 |
+| `INTERVIEW_GUIDE.md` | 面试口述稿（30s / 3min / 10min）+ 6 亮点 + 6 踩坑 + 8 组 Q&A + 风险提示 | 面试 |
+
+> 写新文档前先看这三份，避免重复劳动；相关内容优先补充到已有文件。
+
 ## 架构速览
 - 后端：`app.py`（FastAPI，端口 8000）—— 注册/登录、行程规划 `/trip/plan`、行程保存 `/trip/save`、`/trips/mine`、`/trips/delete`、分享 `/share/create` `/share/{id}`、酒店高德 `/hotels/search` `/hotels/detail` `/hotels/photos` `/districts`、对话 WebSocket `/chat`
 - 前端：`sub_projects/agent-chat-ui`（Next.js + Tailwind v4 + pnpm），后台工作台在 `/workspace?t=xxx`
@@ -80,6 +90,78 @@
 - 返回是 `{success, result:{content:[{type:"text", text:"<json 字符串>"}]}}`，需二次 `JSON.parse`
 - 火车 `train.searchLowestPriceTrain`、机票 `flight.searchLowestPriceFlight`、酒店 `hotel.tuniuHotelSearch/tuniuHotelDetail`
 
+### 3.9 途牛图片必须加 `referrerPolicy="no-referrer"`（重要！）
+
+途牛图片有两个 CDN 域名，行为不同：
+
+| 域名 | 防盗链 | 说明 |
+|---|---|---|
+| `m.tuniucdn.com` | ❌ 无 | 直接可加载 |
+| `s.tuniu.net` | ✅ **有** | 带非白名单 Referer → **403 Forbidden** |
+
+浏览器加载图片会带 `Referer: http://localhost:3000/` → `s.tuniu.net` 的图**全部裂掉**（表现为空白/占位）。
+curl 不带 Referer 时却是 200，所以容易误判成"图片没问题"。
+
+**解法**：所有渲染途牛图片的 `<img>` 加 `referrerPolicy="no-referrer"`
+（浏览器就不发 Referer，防盗链放行）。
+
+已加的地方：`ToursPanel` / `CarRentalPanel` / `HotelsPanel`（酒店卡片 / 详情大图 / 环境图缩略 / 房型图）。
+**新增展示途牛图的组件时别忘了加**。
+
+配套：`onError` 不要只 `display:none`（会留空白），要显示占位（如「🏞️ 暂无图片」）。
+
+### 3.10 tuniu CLI 在 Windows 会偶发崩溃（已加重试）
+
+报错形如：
+```
+Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94
+```
+是 libuv 在 Windows 上的已知竞态，**重试一次就能成功**（实测首次 500 → 重试 200）。
+
+`src/app/api/tuniu/route.ts` 的 `runTuniu()` 已内置重试：
+只对 `/Assertion failed|UV_HANDLE_CLOSING/` 这类瞬时错误重试（间隔 300ms），
+业务错误（参数错、无权限等）直接抛出，不浪费一次调用。
+
+### 4.0 途牛能力边界（已全量核对，别再重复试）
+`tuniu list` 只有 **9 个 server**，工具全集如下：
+
+| server | 工具 | 覆盖业务 |
+|---|---|---|
+| `flight` | searchLowestPriceFlight / multiCabinDetails / getBookingRequiredInfo / saveOrder / cancelOrder | 国内机票 |
+| `intelflight` | list_intel_flights / list_intel_round_trip_flights / get_intel_flight_details / … | 国际机票 |
+| `train` | searchLowestPriceTrain / queryTrainDetail / bookTrain / queryTrainOrderDetail / cancelOrder | 火车票 |
+| `hotel` | tuniuHotelSearch / tuniuHotelDetail / tuniuHotelCreateOrder | 酒店 |
+| `ttms-hotel` | （需 sk- 前缀专用 key） | 企业商旅酒店 |
+| `ticket` | query_cheapest_tickets / get_ticket_book_form / create_ticket_order | 门票 |
+| `cruise` | searchCruiseList / getCruiseProductDetail / … | 邮轮 |
+| `holiday` | searchHolidayList / getHolidayProductDetail / getHolidayBookingRequiredInfo / saveHolidayOrder | **度假产品（跟团 / 自助游 / 自驾游）** |
+| `package-booking` | package_booking_create / package_booking_submit | 打包订（机/火/酒/门票任两类组合） |
+
+**⚠️ 途牛没有「保险」和「纯租车」接口**（已核对全部工具名）。要这两个能力必须：
+- **租车** → 高德 POI 搜「汽车租赁」拿真实门店（`GET /poi/search?city=&keyword=`），
+  或途牛 `holiday` 的 `queryTypeName=自驾游`（打包产品，非裸车租赁）；
+  真要比价下单需接专业租车平台 API（神州/一嗨）或聚合 API（携程/飞猪）
+- **保险** → `POST /insurance/advice`（LLM 出常识性建议，`source=ai|fallback`）；
+  真投保需接保险公司开放平台或聚合保险 API
+
+**holiday 关键参数**：`queryTypeName` 只接受精确枚举 `跟团 / 自助游 / 自驾游`，传错会调用失败。
+返回 `data.count`（总数）+ `data.rows[]`（productId / productName / price / tourDay / queryType /
+satisfy / peopleNum / picUrl / customConditionName / brandTypeName）。
+
+**holiday 详情 `getHolidayProductDetail`（4 个必填，全部来自列表行，缺一不可）**：
+- `productId` ← 行内 `productId`
+- `departCityCode` ← 行内 `departCityCode`，**必须是数组且原样传**（如 `[0]`，服务端取首元素）
+- `classBrandParentId` ← 行内 `classBrandId`
+- `proMode` ← 行内 `proMode`
+- `departsDateBegin/End` 仅在列表行明确返回时才成对传
+
+> ⚠️ 所以 `normalizeHolidays()` 必须把这 4 个字段一起带出来（前端要用来调详情）。
+> 详情返回：`productName`(HTML 转义) / `departureCityName` / `duration` / `productNight` /
+> `characteristic` / `productPicList[]` / `customCondition[]` /
+> **`productPriceCalendar`**（count + rows[].departDate/tuniuPrice/tuniuChildPrice）/
+> **`journeySummary`（是 list 不是 dict！）**，每项 `{day, title, moduleList[]}`，
+> moduleList 项按 `moduleType` 分 hotel/scenic/food/activity/reminder/shopping/flight/traffic。
+
 ### 4.1 车票/机票：余票详情 + 分页（重要）
 - **余票详情工具**（点「预订」才调，按需拉取）：
   - 火车：`train.queryTrainDetail`，参数 `departureStationName / arrivalStationName / departureDate / trainNum`
@@ -103,7 +185,32 @@
 - 途牛酒店房型字段：`roomTypeName` / `roomSize` / `images[]` / `floor`（不是 roomName/roomArea/pic/window）
 - `cancelText` 是短文案、`cancelDesc` 是长段落
 
+### 5.0 `extra_notes`（额外要求）的完整链路
+用户填的「额外要求」在 `plan_trip` 里有 **3 条消费路径**，缺一条就会出现"写了没效果"：
+1. **提取结构化资源**：`_extract_specified_hotel` / `_extract_specified_train` 从文本里抓酒店名/车次号
+2. **喂给 LLM 生成文案**：`notes_section` 塞进 summary prompt，产出
+   - `ai_summary`（整体推荐语）
+   - `plans[].dining` ← **餐饮卡片**。注意：`dining` 原本是**硬编码**的（"本帮菜+特色美食"），
+     必须由 LLM 的 `dining` 字段覆盖才会生效
+   - `extra_note_reply`（对额外要求的一句话落实说明）
+3. **回显**：payload 带 `extra_notes` + `extra_note_reply`，详情页左栏「行程信息」末尾渲染展示卡片
+
+> ⚠️ 加新需求时先想清楚：用户的要求是"要影响生成内容"还是"只要被看到"。
+> 只做第 3 步（回显）会出现"我写了但没效果"的观感。
+
+> ⚠️ Python f-string 里写中文示例时**不要用英文双引号**（会提前结束字符串），
+> 用 `「」` 或转义 `\"`。
+
 ## 前端约定
+- **筛选条件的输入框语义要明确，别只给单边**（踩过的坑）：
+  旅游团页原本只有一个「预算下限 ¥」输入框，用户填 3500 以为是"预算 3500"，
+  实际查的是"**¥3500 以上**"→ 结果 0 条，用户以为功能坏了。
+  **正确做法**：给「最低价 + 最高价」区间；查不到时自动放宽并告知真实价格区间。
+- 面向用户的页面**不要放技术说明块**（平台能力边界、备用方案、实现细节）——
+  这些是开发向信息，归档到本文档即可
+- 折叠/展开类 UI 状态要持久化到 localStorage（如 `fy_sidebar_services_open`），
+  且折叠时若当前 tab 属于该分组，标题要保留高亮提示
+
 - 行程名称统一显示 `出发地 → 目的地`
 - 长文本放 flex 子项必须配 `min-w-0` + `truncate`，否则会被挤压成竖排
 - 行程导出：图片（PNG，html-to-image + `TripExportCard.tsx` 内联样式）；分享：`/share/{id}` 链接（仅本机/局域网可打开）
@@ -121,8 +228,24 @@
   - ticket → `{number, from, to, depart, arrive, price, category, duration}`
   - 前端 `normalizeHotelPick/normalizeTicketPick` 兼容旧字符串数据
   - 提交时同时传 `selected_xxx`(名称/车次号，兼容) + `selected_xxx_detail`(完整对象)
-  - 后端 `plan_trip` 用 detail 生成真实的 hotels[0]/tickets[0]（否则车次时刻是 `—`）
 - 相关 localStorage key：`fy_create_trip_draft`（草稿）/ `fy_pending_pick`（回填信道）/ `fy_tickets_query` / `fy_hotels_query` / `fy_chat_session` / `fy_chat_cache` / `fy_chat_pos` / `fy_chat_size`
+
+#### ⚠️ 5.1.1 选定资源「选了却没用上」的两个真实 bug（2026-09-15 修复）
+1. **只管了经济档** —— `plans` 里经济档用 `hotels[0]`、**舒适档用 `hotels[1]`**、豪华档用 `hotels[-1]`。
+   用户选定的酒店被置顶到 `hotels[0]`，但用户默认选的是**舒适档** → 看到的是别的酒店。
+   **修复**：`specified_hotel and hotels[0].get("user_specified")` → 遍历覆盖 `p["hotel"] = hotels[0]`（所有档位都用选定的）。
+2. **命中同名项时只用旧数据** —— 选定资源如果已在列表里（**很常见，用户就是从列表里选的**），
+   原代码只打 `user_specified` 标记，**不覆盖字段** → 车次仍显示 mock 的 `08:30 出发 ¥553`，
+   而用户选的是 `07:15 出发 ¥139.5`。
+   **修复**：抽出 `_apply_hotel_detail(item)` / `_apply_ticket_detail(item)`，
+   在 `hit >= 0` 分支也用它覆盖（价格/评分/星级/商圈/站点/时刻/车型/耗时）。
+
+3. **回填入口太窄** —— 只有 `?pick=xxx` 模式才有「加入行程」按钮；
+   用户从侧边栏直接进酒店/车票页只能点「预订」（只弹 toast，不写回填数据）。
+   **修复**：非 pick 模式也加「+ 行程」次要按钮；详情弹窗底部也加「➕ 加入行程」。
+4. **回填加兜底** —— CreateTripPanel 的回填 effect 除了挂载时读一次，
+   还加了 5 秒内每 400ms 的轮询兜底，防止组件未重挂载 / 时序竞态丢数据。
+
 
 ### 5.2 ChatDock 默认收起 + 右下角
 - `useState(false)` —— 进入页面默认收起，只留右下角「AI 助手」悬浮钮
@@ -131,6 +254,39 @@
   - 拖过 → 两态都跟随 `pos`
 - `fy_chat_pos` 只在 `posCustom` 为 true 时才写入（避免把默认坐标固化）
 - `DEFAULT_BOTTOM = 24` 替代原来的 `DEFAULT_TOP`
+
+## 性能与耗时（重要 · 排查过一轮）
+
+### `/trip/plan` 实测 50~60 秒，耗时构成
+| 环节 | 耗时 | 说明 |
+|---|---|---|
+| 5 路网络取数（酒店/车票/机票/景点/天气） | 串行 4.6s → **并发 2.3s** | 已用 ThreadPoolExecutor 并发 |
+| **LLM 文案生成** | **40~50s** | **绝对瓶颈，占 90%+** |
+
+### 模型服务本身很慢（实测）
+- `llm.invoke("你好")` ≈ **11s**（基础延迟）
+- 短 JSON 输出 ≈ 22s
+- 完整行程 JSON（6 字段）≈ **43s**
+
+### 结论
+**总耗时无法靠代码优化显著改善**（网络只占 4.6s）。可行方向：
+1. **换更快的模型** —— 改 `.env` 的 `BASE_LLM`（最有效）
+2. **减少 LLM 输出字段/字数** —— 输出越短越快，线性关系
+3. **两阶段返回** —— 先返回不含文案的骨架（~5s），AI 文案异步补（改动较大）
+
+### 必做的体验补偿
+- 前端**必须**有进度反馈（`genStage()` 阶段文案 + 计时 + 进度条 + 长等待提示），
+  否则用户会以为"卡死/模型坏了"。**这次的问题就是这个，不是识别问题。**
+- 前端 fetch 加 `AbortController` 超时（150s），避免真无限等待
+
+### 已修的隐藏 bug
+- `_ai_summarize(prompt, timeout=20)` 的 **`timeout` 参数原来从未生效**（没传给 LLM）。
+  已改用 `ThreadPoolExecutor + future.result(timeout=90)` 实现真实超时；
+  **默认 90s**（不能设小，否则 40s+ 的模型调用会被误杀导致文案全部降级）。
+
+### 排查提示
+- 独立脚本调 `plan_trip` 时 **tuniu 会返回 None** —— 因为 `trip_planner` 自身不 import `base.config`，
+  `.env` 没被加载。脚本里要显式 `from dotenv import load_dotenv; load_dotenv()`。
 
 ## 常用命令
 ```bash

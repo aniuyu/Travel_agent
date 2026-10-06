@@ -412,6 +412,25 @@ def hotels_photos(name: str, city: str = ""):
         )
 
 
+@app.get('/poi/search')
+def poi_search(city: str, keyword: str, limit: int = 8):
+    """
+    通用高德 POI 搜索。
+    用于「租车门店」「保险公司网点」等非酒店/非景点场景。
+    前端调：GET /poi/search?city=上海&keyword=汽车租赁&limit=8
+    """
+    try:
+        n = max(1, min(int(limit), 20))
+        rows = trip_planner._search_poi(city, keyword, offset=n)
+        return {"status": "success", "data": rows}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500, content={"status": "error", "message": f"POI 搜索失败：{e}"}
+        )
+
+
 # ---------------------------------------------------------------------------
 # AI 行程规划（调用真实工具：地理编码 + 天气 + 酒店/车票）
 # ---------------------------------------------------------------------------
@@ -473,6 +492,69 @@ def trip_plan(body: TripPlanBody):
         return {"status": "success", "data": {**result, "share_id": share_id}}
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"行程生成失败：{e}"})
+
+
+# ---------------------------------------------------------------------------
+# 旅游保险建议（途牛没有保险服务，这里用 LLM 基于行程给常识性建议）
+# ---------------------------------------------------------------------------
+class InsuranceAdviceBody(BaseModel):
+    destination: str = ""
+    days: str = "3天"
+    companion: str = "独旅"
+    pref: str = ""
+
+
+@app.post('/insurance/advice')
+def insurance_advice(body: InsuranceAdviceBody):
+    """
+    基于行程生成旅游保险建议。
+    注意：途牛开放平台**没有保险类接口**，这里输出的是常识性建议（非实时产品/报价）。
+    """
+    import json as _json
+    import re as _re
+
+    fallback = {
+        "summary": "短途旅行建议优先配置意外险与医疗险，其余按行程特点取舍。",
+        "items": [
+            {"name": "旅游意外险", "reason": "覆盖旅途中的意外伤害，最基础必备", "priority": "高"},
+            {"name": "旅游医疗保险", "reason": "异地就医费用高，医疗险可报销", "priority": "高"},
+            {"name": "航班/列车延误险", "reason": "交通延误可获赔付", "priority": "中"},
+            {"name": "行李丢失险", "reason": "行李延误或丢失时补偿", "priority": "中"},
+            {"name": "紧急救援服务", "reason": "偏远地区或境外出行时的重要保障", "priority": "中"},
+        ],
+    }
+
+    try:
+        prompt = (
+            "你是旅游保险顾问。请针对用户的行程，输出 JSON（不要任何多余文字）：\n"
+            '{"summary":"一句话说明该行程最该关注的风险","items":['
+            '{"name":"险种名称","reason":"为什么需要（20字内）","priority":"高/中/低"}]}\n'
+            f"行程信息：目的地 {body.destination or '未指定'}，{body.days}，出行人群 {body.companion}，"
+            f"偏好 {body.pref or '无'}。\n"
+            "要求：\n"
+            "- 给出 5-6 个具体险种，按该行程的实际风险从高到低排序；\n"
+            "- 结合行程特点说明理由（如短途商务 vs 亲子游 vs 户外探险的风险不同）；\n"
+            "- 只给常识性建议，不要编造具体产品名、保险公司或价格。"
+        )
+        raw = trip_planner._ai_summarize(prompt, timeout=90, max_tokens=600)
+        if raw:
+            m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+            if m:
+                obj = _json.loads(m.group(0))
+                if obj.get("items"):
+                    return {
+                        "status": "success",
+                        "data": {
+                            "summary": obj.get("summary") or fallback["summary"],
+                            "items": obj["items"],
+                            "source": "ai",
+                        },
+                    }
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    return {"status": "success", "data": {**fallback, "source": "fallback"}}
 
 
 @app.get('/')
